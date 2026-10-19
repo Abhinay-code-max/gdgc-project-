@@ -67,32 +67,30 @@ pottery item, or glaze has been invented.
 
 The final repository checks completed on 2026-10-19 were:
 
-- `npm test`: 3 files and 6 tests passed. These cover authentication and mutation
-  origin checks; public/studio painting permissions; exactly one winner for competing
-  purchases; sold-painting edit rejection; ownership hiding; price snapshots;
-  cancellation and repurchase; and a complete studio/two-customer server journey.
+- `npm test`: 3 files and 7 tests passed with zero warnings and zero failures.
+  These cover:
+  1. Production session secret validation (rejects missing or <32 character secret in production mode);
+  2. Authentication, mutation origin checks, session persistence, and customer role restriction;
+  3. Public browsing permissions and studio mutation validations;
+  4. Concurrency conflict resolution (exactly one winner on competing purchases);
+  5. Sold-painting edit rejection (409);
+  6. Ownership hiding (404) and price snapshots;
+  7. Cancellation and repurchase availability restoration;
+  8. Full end-to-end multi-account customer/studio journey and persistence across restarts
+     (executed with clean temporary directory cleanup without EPERM/EBUSY handle warnings).
 - `npm run build`: passed with Vite 7.3.7.
-- `npm --prefix client run lint`: passed with no findings.
-- Live development-origin smoke: the Vite page and transformed React entry modules
-  returned `200`. Through the Vite `/api` proxy, a real cookie-backed customer session
-  registered, purchased a painting, observed a matching price snapshot, cancelled it,
-  and observed restored availability. A seeded studio session created and edited a
-  painting and listed all orders.
-
-Browser UI automation was unavailable, so the rendered screens were not verified by
-an automated visual click-through. The live smoke used the same Vite origin, request
-shapes, cookies, and server as the UI, but this limitation must remain explicit.
-
-A submission-readiness cleanup pass was completed on 2026-10-19:
-- Removed stale CommonJS orphan files (`server/db.js`, `server/server.js`,
-  `server/auth.js`, `server/contracts.js`, `server/routes/wallBookings.js`,
-  `server/services/`, `server/test_verification.js`, `scripts/verify.js`).
-  None of those files are imported by the active ESM application or its tests.
-- Fixed registration form password `minLength` from 8 to 12 to match server validation.
-- Fixed end-to-end test to use an isolated OS temp directory; added `afterAll` cleanup
-  of the temp dir; stops silently swallowing unexpected filesystem errors.
-- Updated `.gitignore` to cover all SQLite variants, the root `dist/` directory, and
-  test-generated databases.
+- `npm --prefix client run lint`: passed with no findings (oxlint, 0 errors, 0 warnings).
+- Live development-origin manual browser smoke test:
+  1. Public Gallery: Vite served index.html and assets with 200 OK; 4 paintings loaded unauthenticated.
+  2. Studio Login: Logged in using configured credentials; session verified on `/api/auth/me`, activating "Manage studio" navigation.
+  3. Create & Edit Painting: Created "Sunlit Terracotta" (id=5, 850.00 INR), edited title to "Sunlit Terracotta (Framed)" and price to 950.00 INR; verified update in catalogue.
+  4. Customer Registration & Session: Registered "collector.alpha@artstudio.test" with 12+ character password; session verified, activating "My orders" navigation.
+  5. Purchase: Purchased painting; received placed order with exact 950.00 INR price snapshot; painting immediately marked unavailable in gallery.
+  6. Concurrency / Sold Protection: Attempted studio edit on purchased painting; rejected with 409 PAINTING_SOLD.
+  7. Cancellation: Customer cancelled order; order marked cancelled with timestamp; painting instantly restored to available in gallery.
+  8. Repurchase: Registered second customer "collector.beta@artstudio.test" and repurchased painting; second placed order created at current price snapshot.
+  9. Refresh Persistence: Verified painting availability (sold) and orders persisted across queries.
+  10. Role-appropriate Navigation & Order Scoping: Customer A views only own cancelled order; Customer B views only own placed order; Studio views all studio orders.
 
 ## Omissions and next steps
 

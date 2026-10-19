@@ -23,8 +23,11 @@ export function createApp(overrides = {}) {
     saveUninitialized: false, rolling: true,
     cookie: { httpOnly: true, sameSite: 'strict', secure: config.isProduction, maxAge: 28800000 },
   };
-  if (overrides.sessionStore) sessionOptions.store = overrides.sessionStore;
-  else if (config.databasePath !== ':memory:') sessionOptions.store = new SQLiteStore({ db: path.basename(config.databasePath), dir: path.dirname(config.databasePath), concurrentDB: true });
+  let sessionStore = overrides.sessionStore;
+  if (!sessionStore && config.databasePath !== ':memory:') {
+    sessionStore = new SQLiteStore({ db: path.basename(config.databasePath), dir: path.dirname(config.databasePath), concurrentDB: true });
+  }
+  if (sessionStore) sessionOptions.store = sessionStore;
   app.use(session(sessionOptions));
   app.use((req, res, next) => {
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
@@ -52,5 +55,6 @@ export function createApp(overrides = {}) {
   app.use(notFound);
   app.use(errorHandler);
   app.locals.db = db;
+  app.locals.sessionStore = sessionStore;
   return app;
 }

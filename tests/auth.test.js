@@ -47,4 +47,26 @@ describe('authentication and mutation protection', () => {
     expect((await request(app).post('/api/auth/login').set('Origin', origin).send({ ...payload, password: 'not-the-password' })).status).toBe(401);
     expect((await request(app).post('/api/auth/login').set('Origin', 'https://evil.example').send(payload)).status).toBe(403);
   });
+
+  it('fails startup in production mode if SESSION_SECRET is missing or shorter than 32 characters', () => {
+    // Missing / empty in production
+    expect(() => createApp({ isProduction: true, sessionSecret: '' }))
+      .toThrow('SESSION_SECRET must contain at least 32 characters in production.');
+    expect(() => createApp({ isProduction: true, sessionSecret: null }))
+      .toThrow('SESSION_SECRET must contain at least 32 characters in production.');
+
+    // Shorter than 32 characters in production
+    expect(() => createApp({ isProduction: true, sessionSecret: 'too-short-secret' }))
+      .toThrow('SESSION_SECRET must contain at least 32 characters in production.');
+
+    // 32+ characters in production succeeds
+    const prodApp = createApp({
+      databasePath: ':memory:',
+      isProduction: true,
+      sessionSecret: 'a'.repeat(32),
+      appOrigin: origin,
+    });
+    expect(prodApp).toBeDefined();
+    prodApp.locals.db.close();
+  });
 });

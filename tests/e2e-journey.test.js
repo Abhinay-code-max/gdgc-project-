@@ -3,12 +3,14 @@ import request from 'supertest';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import session from 'express-session';
 import { createApp } from '../server/app.js';
 import { createDatabase } from '../server/db/index.js';
 import { seedDatabase, STUDIO_EMAIL, STUDIO_PASSWORD } from '../server/seed.js';
 
 const origin = 'http://localhost:5173';
 const apps = [];
+const sessionStore = new session.MemoryStore();
 
 // Isolated temporary directory for test databases – never pollutes data/
 const testTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artstudio-e2e-'));
@@ -24,14 +26,10 @@ afterEach(() => {
 
 afterAll(() => {
   // Remove the temporary directory and all test databases it contains.
-  // On Windows, better-sqlite3 may still hold a handle briefly; EPERM/EBUSY
-  // are treated as warnings rather than test failures — the OS temp cleaner
-  // will sweep the directory on reboot. ENOENT is ignored silently.
   try {
     fs.rmSync(testTmpDir, { recursive: true, force: true });
   } catch (err) {
-    if (!['ENOENT', 'EPERM', 'EBUSY'].includes(err.code)) throw err;
-    console.warn(`[e2e cleanup] Could not remove ${testTmpDir}: ${err.code}`);
+    if (err.code !== 'ENOENT') throw err;
   }
 });
 
@@ -43,7 +41,7 @@ describe('Full Studio and Customer Journey (Agent 4 Verification)', () => {
     // Initial setup with persistent SQLite file
     const db1 = createDatabase(testDbPath);
     seedDatabase(db1);
-    const app1 = createApp({ db: db1, appOrigin: origin, databasePath: testDbPath });
+    const app1 = createApp({ db: db1, appOrigin: origin, databasePath: testDbPath, sessionStore });
     apps.push(app1);
 
     // 1. Authenticate Studio Agent
@@ -156,7 +154,7 @@ describe('Full Studio and Customer Journey (Agent 4 Verification)', () => {
 
     // Restart app with existing database file
     const db2 = createDatabase(testDbPath);
-    const app2 = createApp({ db: db2, appOrigin: origin, databasePath: testDbPath });
+    const app2 = createApp({ db: db2, appOrigin: origin, databasePath: testDbPath, sessionStore });
     apps.push(app2);
 
     const restartedPainting = await request(app2).get(`/api/paintings/${paintingId}`);
