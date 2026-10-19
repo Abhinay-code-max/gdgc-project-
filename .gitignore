@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+client/dist/
+
+# Environment secrets – never commit
+.env
+.env.local
+.env.*.local
+
+# SQLite databases (persistent dev DB and all test-generated files)
+data/*.sqlite
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/*.db-journal
+
+# macOS / Windows system files
+.DS_Store
+Thumbs.db
