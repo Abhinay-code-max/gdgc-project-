@@ -74,8 +74,19 @@ MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
 MONGODB_DB_NAME=art_studio
 ```
 
-### 3. Test Environment (Zero-Config Portable Replica Set)
-Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). You can optionally specify a custom binary via `MONGOMS_SYSTEM_BINARY=<path-to-mongod>` and/or `MONGOMS_VERSION=<version>`. If omitted, tests portably execute using `mongodb-memory-server`'s default managed binary without requiring external cluster setup or Atlas network dependencies. Both default and explicit system binary modes run with zero version-conflict warnings.
+### 3. Test Environment (Zero-Config Portable Replica Set & System Binary)
+Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). Two reliable test execution modes are supported:
+
+- **Default Portable Mode (`npm test`):** Executes all test suites in parallel using the portable managed binary cached by `mongodb-memory-server`. Does not require local MongoDB installations.
+- **Explicit System Binary Mode (`npm run test:system-mongo`):** Executes test suites serially (`--no-file-parallelism`) against a local system `mongod` specified via `MONGOMS_SYSTEM_BINARY`. This serial mode prevents replica-set startup and port collision across test processes.
+
+Example running with explicit system binary on Windows:
+```powershell
+$env:MONGOMS_SYSTEM_BINARY = "C:\Program Files\MongoDB\Server\8.3\bin\mongod.exe"
+npm run test:system-mongo
+```
+
+If an invalid or non-existent path is provided in `MONGOMS_SYSTEM_BINARY`, the test runner validates the path upfront and fails clearly with an informative error before starting test suites.
 
 ---
 
@@ -105,21 +116,42 @@ Dependencies are consolidated at the project root with a single authoritative `p
 # 1. Clean installation of all dependencies (root, server, client, linter, tests)
 npm ci
 
-# 2. Run automated test suite (30 unit, integration, and concurrency tests across 4 suites)
+# 2. Run automated test suite (33 unit, integration, and concurrency tests across 5 suites)
 npm test
 
-# 3. Build production client bundle (0 warnings)
+# 3. Or run against an explicit local system MongoDB binary
+# $env:MONGOMS_SYSTEM_BINARY = "C:\Program Files\MongoDB\Server\8.3\bin\mongod.exe"
+npm run test:system-mongo
+
+# 4. Build production client bundle (0 warnings, deterministic ~292 kB minified bundle)
 npm run build
 
-# 4. Lint frontend code (0 warnings, 0 errors)
+# 5. Lint frontend code (0 warnings, 0 errors)
 npm run lint
 
-# 5. Initialize database indexes
+# 6. Initialize database indexes
 npm run db:init
 
-# 6. Seed studio account and sample fixtures
+# 7. Seed studio account and sample fixtures
 npm run db:seed
 ```
+
+### Installation Script Warnings (`allow-scripts`)
+During a clean `npm ci`, npm outputs two informative warnings:
+```
+npm warn allow-scripts 2 packages have install scripts not yet covered by allowScripts:
+npm warn allow-scripts   esbuild@0.28.2 (postinstall: node install.js)
+npm warn allow-scripts   mongodb-memory-server@11.3.0 (postinstall: node ./postinstall.js)
+```
+These warnings are expected and benign:
+- `esbuild` invokes its postinstall binary installer.
+- `mongodb-memory-server` includes a postinstall hook which is intentionally constrained via `"config": { "mongodbMemoryServer": { "disablePostinstall": "1" } }` in `package.json` to prevent arbitrary binary downloads during installation.
+- We deliberately avoid blindly approving unvetted scripts; npm installs and runs cleanly with 0 vulnerabilities.
+
+### Environment Modes
+- **`npm run dev`**: Runs in development mode (`NODE_ENV=development`) for Vite hot-module replacement and rapid local feedback.
+- **`npm run build`**: Always explicitly sets and runs in production mode (`NODE_ENV=production` via `cross-env`), guaranteeing a deterministic minified production bundle (`index-B2VCdnYL.js`, ~292 kB / ~91 kB gzip) regardless of shell environment or local `.env` settings.
+- **Deployed Server**: Production server deployments must set `NODE_ENV=production` in the hosting environment to enforce secure cookie handling, production session secret validation (minimum 32 characters), and optimized Express runtime behavior.
 
 ---
 

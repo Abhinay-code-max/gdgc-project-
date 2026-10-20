@@ -98,7 +98,7 @@ supplies `customerEmail` when accessed by studio sellers.
 
 Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
 
-- `npm test`: 4 test files and 30 tests passed with zero failures and zero warnings across both portable default binary and explicit `MONGOMS_SYSTEM_BINARY` configurations.
+- `npm test`: 5 test files and 33 tests passed with zero failures and zero warnings in parallel default portable mode.
   1. Production session secret validation (rejects missing or <32 characters in production mode);
   2. MongoDB connection failure provides clear startup error;
   3. Standalone MongoDB topology without transaction support is explicitly rejected;
@@ -127,13 +127,18 @@ Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
   26. Ownership hiding (404 `ORDER_NOT_FOUND`), stable `customerId` string serialization, price snapshot immutability, and cancellation/repurchase restoration;
   27. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
   28. Frontend routing contract (SPA index.html served for client routes and JSON for API routes);
-  29. Routing tests run with isolated temporary fixture, leaving no repo `dist/` pollution.
-- `npm run build`: Vite 7 production bundle built successfully with 0 warnings (clean single 495 kB bundle).
+  29. Routing tests run with isolated temporary fixture, leaving no repo `dist/` pollution;
+  30. Narrow Vite Rollup warning filter suppresses known React Router directive warnings;
+  31. Application source directive warnings pass through to the default handler;
+  32. Unrelated Rollup warnings pass through to the default handler;
+  33. Invalid `MONGOMS_SYSTEM_BINARY` fails clearly during startup before test suites execute.
+- `npm run test:system-mongo`: 5 test files and 33 tests passed serially (`--no-file-parallelism`) against MongoDB 8.3.4 with zero version conflicts and zero replica-set startup collisions.
+- `npm run build`: Cross-env production build (`cross-env NODE_ENV=production`) compiles deterministically to `index-B2VCdnYL.js` (292.70 kB / 91.19 kB gzip) with 0 warnings in both development workspaces and clean checkouts.
 - `npm run lint`: oxlint passed with 0 warnings and 0 errors across all 13 client files using the single root package configuration.
 - `npm audit` and `npm audit --omit=dev`: Found 0 vulnerabilities.
 - `npm run db:init`: Idempotent index initialization completed successfully.
 - `npm run db:seed`: Idempotent seeding completed successfully.
-- Dependency model: Single authoritative root `package.json` and lockfile with redundant `client/package.json` and `client/node_modules` eliminated. Clean checkouts install cleanly via `npm ci`.
+- Dependency model: Single authoritative root `package.json` and lockfile with redundant `client/package.json` and `client/node_modules` eliminated. Clean checkouts install cleanly via `npm ci` with two documented expected lifecycle warnings (`allow-scripts` for `esbuild` and `mongodb-memory-server`).
 
 ## Five-minute demonstration
 

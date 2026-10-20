@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import childProcess from 'node:child_process';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
@@ -8,9 +9,22 @@ import { Order } from '../server/models/Order.js';
 
 let replSetInstance = null;
 
+export function validateSystemBinary(binaryPath = process.env.MONGOMS_SYSTEM_BINARY) {
+  if (!binaryPath) return;
+  if (!fs.existsSync(binaryPath)) {
+    throw new Error(`Configured MONGOMS_SYSTEM_BINARY does not exist: "${binaryPath}"`);
+  }
+}
+
+// Fail clearly before test suites start if an invalid system binary path was configured
+if (process.env.MONGOMS_SYSTEM_BINARY) {
+  validateSystemBinary(process.env.MONGOMS_SYSTEM_BINARY);
+}
+
 function getBinaryConfig() {
   const binary = {};
   if (process.env.MONGOMS_SYSTEM_BINARY) {
+    validateSystemBinary(process.env.MONGOMS_SYSTEM_BINARY);
     binary.systemBinary = process.env.MONGOMS_SYSTEM_BINARY;
     if (process.env.MONGOMS_VERSION) {
       binary.version = process.env.MONGOMS_VERSION;
