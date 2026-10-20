@@ -11,11 +11,15 @@ uploads, deployment, and account extras are also out of scope.
 
 ## Architecture
 
-The browser client is React 19 built with Vite. It talks to an Express JSON API at
-`/api`; Vite proxies that path to the server during development. The server stores
-application and session data in a persistent repository-local SQLite database using
-`better-sqlite3`. WAL mode, foreign keys, explicit immediate transactions, and a
-partial unique index provide a compact setup without an external database service.
+The browser client is React 19 built with Vite and routed with React Router 7 (`react-router-dom`).
+It talks to an Express 5 JSON API at `/api`; Vite proxies that path to the server during
+development. In production, Express serves built assets and delegates unknown non-API routes
+to the React application so client routes (and the custom 404 page) render cleanly.
+
+The server stores application data in MongoDB using Mongoose 9, with session storage
+backed by MongoDB via `connect-mongo`. Data integrity and concurrency are guaranteed through
+MongoDB multi-document transactions and a partial unique index on orders
+(`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`).
 
 Success responses use `{ "data": ... }`. Errors use a stable code and human-readable
 message under `error`, with optional field errors. Money is always an integer number
@@ -23,98 +27,91 @@ of INR paise on the server and is formatted as rupees only for display.
 
 ## Login, roles, and ownership
 
-Public registration always creates a `customer`. The sole `studio` account is created
-by the controlled seed command. Passwords are hashed; the browser receives only an
-HTTP-only, same-site session cookie. The server checks mutation origins.
+The application provides dual authentication: standard password login (hashed with `bcryptjs`)
+and Google OAuth 2.0 via `passport-google-oauth20`.
 
-The UI uses the current-user response to show role-appropriate navigation, but this is
-only presentation. Server middleware is the authority: missing authentication returns
-`401`, a wrong role returns `403`, and a customer asking for another customer's order
-receives `404`. Purchase and cancellation ownership always comes from the session;
-the client never supplies a customer ID.
+Internal authorization roles remain `customer` and `studio` to preserve permission middleware.
+In the user interface, these roles are presented as **Buyer** and **Seller**.
+Public registration always creates a `customer` (Buyer). The sole `studio` (Seller) account is
+created by the idempotent seed command.
+
+Google OAuth flow:
+- `GET /api/auth/google` starts the flow.
+- `GET /api/auth/google/callback` processes provider callback.
+- New Google users are automatically assigned the `customer` (Buyer) role.
+- Only provider-verified emails are trusted.
+- If a verified Google email matches an existing account (including studio), it is safely linked
+  without altering its existing role. Google users can never inject or escalate to the studio role.
+- Missing Google credentials are handled gracefully: the application displays a helpful
+  configuration message without crashing.
+
+Server middleware is the authority: missing authentication returns `401`, a wrong role returns
+`403`, and a customer asking for another customer's order receives `404`. Purchase and
+cancellation ownership always comes from the server session; the client never supplies a customer ID.
+
+## Rate limiting
+
+Configured via `express-rate-limit`:
+- Standard API limiter on `/api/*` (300 req / 15 min).
+- Strict auth limiter on registration and password login (10 req / 15 min).
+- OAuth limiter on initiation and callback endpoints (25 req / 15 min).
+- Returns standard HTTP 429 status with code `RATE_LIMITED` and standard headers.
+- Isolated limiter state in tests prevents pollution across suites.
 
 ## Painting concurrency and history
 
-Availability is derived from the absence of a `placed` order. Purchase starts an
-immediate SQLite write transaction, checks current availability, and inserts an order
-with a price snapshot. A partial unique index on `orders(painting_id)` where status is
-`placed` remains the final concurrency guard, so two buyers cannot both hold the same
-painting. The loser receives `409 PAINTING_UNAVAILABLE`.
+Availability is derived from the absence of an active `placed` order. Purchase runs inside
+a MongoDB transaction session: checks existence and availability, and inserts an order
+with a price snapshot. The partial unique index on `orders` where `status = 'placed'` serves
+as the final concurrency guard at the database engine level. If two buyers attempt to purchase
+the same painting simultaneously, exactly one order is created (201) and the competing purchase
+is rejected with `409 PAINTING_UNAVAILABLE`.
 
-Cancellation changes the owning customer's placed order to `cancelled`; it does not
-delete history. Because availability is derived, the painting becomes purchasable
-again in the same committed state. Studio editing uses the same locking approach and
-rejects a sold painting with `409 PAINTING_SOLD`.
+Cancellation updates only the owned placed order to `cancelled` with `cancelledAt` timestamp.
+Because availability is derived, the painting becomes immediately purchasable again.
+Studio editing uses the same atomic lock and rejects a sold painting with `409 PAINTING_SOLD`.
 
-## Interface behavior
+## Interface and loading experience
 
-The gallery is public. Authentication opens a focused login or registration dialog.
-Customers can purchase from the gallery and cancel placed orders from **My orders**.
-Studio users can add paintings, edit available work, and inspect all orders.
-
-Every data view has loading, empty, and retryable error states. Mutation controls are
-disabled while pending. Purchase, cancellation, and edit conflicts are called out and
-the relevant collection is refreshed. Prices, statuses, roles, and permissions shown
-after a mutation come from a fresh server response rather than optimistic assumptions.
-
-## Seed and fixture policy
-
-The studio account is controlled seed data. Any bundled paintings are visibly labelled
-sample fixtures and are not represented as the official brief dataset. No wall rate,
-pottery item, or glaze has been invented.
+- Dedicated pages: `/` (Home), `/login` (Login), `/register` (Registration), `/gallery` (Paintings),
+  `/buyer` (Buyer Dashboard), `/seller` (Seller Dashboard), and `*` (Branded 404 Page).
+- Animated Logo Loader: Atelier easel canvas monogram with animated brush stroke and serif letter 'A'.
+  Accessible with `role="status"` and live region. Complies with `@media (prefers-reduced-motion: reduce)`.
+  Does not permanently block pages if an API request fails.
+- All views feature loading, empty, pending, error, and conflict states.
 
 ## Verification record
 
-The final repository checks completed on 2026-10-19 were:
+Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
 
-- `npm test`: 3 files and 7 tests passed with zero warnings and zero failures.
-  These cover:
-  1. Production session secret validation (rejects missing or <32 character secret in production mode);
-  2. Authentication, mutation origin checks, session persistence, and customer role restriction;
-  3. Public browsing permissions and studio mutation validations;
-  4. Concurrency conflict resolution (exactly one winner on competing purchases);
-  5. Sold-painting edit rejection (409);
-  6. Ownership hiding (404) and price snapshots;
-  7. Cancellation and repurchase availability restoration;
-  8. Full end-to-end multi-account customer/studio journey and persistence across restarts
-     (executed with clean temporary directory cleanup without EPERM/EBUSY handle warnings).
-- `npm run build`: passed with Vite 7.3.7.
-- `npm --prefix client run lint`: passed with no findings (oxlint, 0 errors, 0 warnings).
-- Live development-origin manual browser smoke test:
-  1. Public Gallery: Vite served index.html and assets with 200 OK; 4 paintings loaded unauthenticated.
-  2. Studio Login: Logged in using configured credentials; session verified on `/api/auth/me`, activating "Manage studio" navigation.
-  3. Create & Edit Painting: Created "Sunlit Terracotta" (id=5, 850.00 INR), edited title to "Sunlit Terracotta (Framed)" and price to 950.00 INR; verified update in catalogue.
-  4. Customer Registration & Session: Registered "collector.alpha@artstudio.test" with 12+ character password; session verified, activating "My orders" navigation.
-  5. Purchase: Purchased painting; received placed order with exact 950.00 INR price snapshot; painting immediately marked unavailable in gallery.
-  6. Concurrency / Sold Protection: Attempted studio edit on purchased painting; rejected with 409 PAINTING_SOLD.
-  7. Cancellation: Customer cancelled order; order marked cancelled with timestamp; painting instantly restored to available in gallery.
-  8. Repurchase: Registered second customer "collector.beta@artstudio.test" and repurchased painting; second placed order created at current price snapshot.
-  9. Refresh Persistence: Verified painting availability (sold) and orders persisted across queries.
-  10. Role-appropriate Navigation & Order Scoping: Customer A views only own cancelled order; Customer B views only own placed order; Studio views all studio orders.
-
-## Omissions and next steps
-
-1. Obtain the official `seedData.zip`, replace sample fixtures, and retain clear data
-   provenance.
-2. Add wall booking only with the official server-side rate, Asia/Kolkata date rules,
-   active-date uniqueness, and its full permission/state-transition test matrix.
-3. Add pottery only after the painting and wall journeys remain green.
-4. Add deployment and production secret/session configuration only if the product
-   scope expands beyond this local prototype.
+- `npm test`: 4 test suites and 16 tests passed with zero failures.
+  1. Production session secret validation (rejects missing or <32 characters in production mode);
+  2. MongoDB connection failure provides clear startup error;
+  3. Customer-only public registration, session persistence, logout, and login;
+  4. Duplicate account rejection, credential checks, and mutation origin protection;
+  5. Google OAuth verified email checking, customer assignment, and unverified email rejection;
+  6. Safe Google account linking to existing studio account without role modification;
+  7. Missing OAuth configuration handled safely;
+  8. Authentication rate limiting returning HTTP 429 with `RATE_LIMITED` code;
+  9. Backend API 404 returning JSON `ROUTE_NOT_FOUND`;
+  10. Required MongoDB indexes verified (including partial unique index on placed orders);
+  11. Public browsing and studio mutation validation;
+  12. Concurrent purchase collision test (one winner 201, one conflict 409 `PAINTING_UNAVAILABLE`);
+  13. Sold painting edit rejection (409 `PAINTING_SOLD`);
+  14. Ownership hiding (404 `ORDER_NOT_FOUND`), price snapshot immutability, and cancellation/repurchase restoration;
+  15. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
+  16. Frontend routing contract (SPA index.html served for client routes and JSON for API routes).
+- `npm run build`: Vite 7 production bundle built successfully.
+- `npm --prefix client run lint`: oxlint passed with 0 warnings and 0 errors across all 14 files.
+- `npm run db:init`: Idempotent index initialization completed successfully.
+- `npm run db:seed`: Idempotent seeding completed successfully.
+- Concurrency and transaction tests run against in-memory replica set (`MongoMemoryReplSet`).
 
 ## Five-minute demonstration
 
-Before running the demo, copy `.env.example` to `.env` and set `STUDIO_EMAIL`,
-`STUDIO_PASSWORD`, and `SESSION_SECRET` to real values. Do not use any hard-coded
-credential shown in documentation.
-
-1. Start on the public gallery and point out availability and public access (30 sec).
-2. Log in as the seeded studio account using the `.env` credentials, create a painting,
-   and edit it (60 sec).
-3. Register customer A, purchase that painting, refresh **My orders**, and show the
-   stored price (60 sec).
-4. Attempt purchase as customer B to show the availability conflict; cancel as
-   customer A, then purchase as customer B (75 sec).
-5. Return to the studio view to show all preserved order history (30 sec).
-6. Walk through the purchase transaction and partial unique index as the featured
-   code segment (45 sec).
+1. **Home Page (45 sec):** Start on `/`. Show the Atelier introduction, animated-logo loader, honest service descriptions, and featured paintings.
+2. **Login & Google OAuth (60 sec):** Go to `/login`. Point out the Google OAuth button and email form. Show how missing Google configuration gracefully surfaces helpful guidance. Log in with studio credentials (`studio@artstudio.com`). Show the navigation indicates **Seller**.
+3. **Seller Workspace (60 sec):** Go to `/seller`. Add a new painting. Point out that unsold paintings can be edited and appear in the gallery.
+4. **Buyer Registration & Concurrent Purchase (75 sec):** Open buyer window, register `buyer1@example.com`, purchase the painting. Attempt simultaneous purchase from `buyer2@example.com` to demonstrate 409 `PAINTING_UNAVAILABLE`. Show the placed order with exact price snapshot in `/buyer`.
+5. **Cancellation & Repurchase (45 sec):** In `/buyer`, cancel the order. Point out that `/gallery` immediately shows the painting as available again. Buyer 2 purchases it, confirming repurchase availability.
+6. **404 & Rate Limiting (15 sec):** Visit `/some-unknown-path` to show the branded 404 page with return links. Demonstrate rate limiting on repeated failed attempts.
