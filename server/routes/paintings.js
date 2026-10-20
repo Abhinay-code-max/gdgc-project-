@@ -19,10 +19,19 @@ export const paintingJson = (r, available = true) => ({
 });
 
 export const orderJson = (r, studio = false, customerEmail = null) => {
+  let customerIdStr = '';
+  if (r.customerId) {
+    if (typeof r.customerId === 'object' && r.customerId._id) {
+      customerIdStr = r.customerId._id.toString();
+    } else {
+      customerIdStr = r.customerId.toString();
+    }
+  }
+
   const out = {
     id: r._id.toString(),
-    customerId: r.customerId.toString(),
-    paintingId: r.paintingId.toString(),
+    customerId: customerIdStr,
+    paintingId: (r.paintingId?._id ? r.paintingId._id.toString() : r.paintingId?.toString()) || '',
     paintingTitle: r.paintingTitle,
     priceMinor: r.priceMinor,
     status: r.status,
@@ -30,8 +39,8 @@ export const orderJson = (r, studio = false, customerEmail = null) => {
     updatedAt: r.updatedAt instanceof Date ? r.updatedAt.toISOString() : r.updatedAt,
     cancelledAt: r.cancelledAt ? (r.cancelledAt instanceof Date ? r.cancelledAt.toISOString() : r.cancelledAt) : null,
   };
-  if (studio && (customerEmail || r.customerEmail)) {
-    out.customerEmail = customerEmail || r.customerEmail;
+  if (studio && (customerEmail || r.customerEmail || r.customerId?.email)) {
+    out.customerEmail = customerEmail || r.customerEmail || r.customerId?.email;
   }
   return out;
 };

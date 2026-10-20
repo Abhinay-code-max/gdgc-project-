@@ -5,10 +5,10 @@ This file is the integration contract agreed for the Art Studio application.
 ## Stack
 
 - Node.js 20+, Express 5, React 19, React Router 7, Vite 7.
-- MongoDB with Mongoose 9. Database is accessed via `MONGODB_URI` (MongoDB Atlas in dev/production). Tests use an isolated in-memory replica set (`MongoMemoryReplSet`) supporting multi-document transactions.
+- MongoDB with Mongoose 9. Database is accessed via `MONGODB_URI` (MongoDB Atlas or replica set in dev/production). Tests use an isolated in-memory replica set (`MongoMemoryReplSet`) supporting multi-document transactions. Standalone topologies without transaction support are rejected.
 - `express-session` with MongoDB-backed session store (`connect-mongo`), HTTP-only same-site (lax for OAuth redirect compatibility) cookies, `bcryptjs` password hashes, JSON body limits, and an Origin check on mutations.
-- Passport.js with Google OAuth 2.0 strategy (`passport-google-oauth20`).
-- `express-rate-limit` for tiered endpoint protection.
+- Passport.js with Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` enforcement.
+- `express-rate-limit` for tiered endpoint protection with configurable `trustProxy`.
 - Vitest/Supertest for server integration and concurrency checks.
 
 ## Response and error format
@@ -42,8 +42,8 @@ is exposed as `priceMinor`. IDs are string representations of MongoDB ObjectIds.
 - `POST /api/auth/logout` -> `200 { data: { loggedOut: true } }`.
 - `GET /api/auth/me` -> `200 { data: { user } }`; no session: `401 AUTH_REQUIRED`.
 - `GET /api/auth/config` -> `200 { data: { googleAuthAvailable: boolean } }`.
-- `GET /api/auth/google` -> Starts Google OAuth 2.0 flow; redirects to Google consent or `/login?error=oauth_not_configured` if credentials missing. Protected by `oauthLimiter`.
-- `GET /api/auth/google/callback` -> Google OAuth callback. Successful authentication establishes session and redirects to `/seller` (studio) or `/buyer` (customer). Failed or cancelled redirects to `/login?error=oauth_failed`. Protected by `oauthLimiter`.
+- `GET /api/auth/google` -> Starts Google OAuth 2.0 flow; generates cryptographically secure 32-byte session-bound `state` nonce; redirects to Google consent or `/login?error=oauth_not_configured` if credentials missing. Protected by `oauthLimiter`.
+- `GET /api/auth/google/callback?state=...&code=...` -> Google OAuth callback. Validates incoming `state` against session-bound nonce (rejects mismatch/missing with redirect `/login?error=oauth_csrf_rejected`). Requires authoritative verified email claim (`email_verified === true`). Successful authentication establishes session and redirects to `/seller` (studio) or `/buyer` (customer). Failed, unverified, or cancelled redirects to `/login?error=...`. Protected by `oauthLimiter`.
 
 User shape: `{ id, email, role, displayName, avatarUrl, createdAt }`.
 Internal roles are `customer` and `studio`, displayed in UI as **Buyer** and **Seller**.
@@ -64,6 +64,7 @@ Internal roles are `customer` and `studio`, displayed in UI as **Buyer** and **S
 
 Painting shape: `{ id, title, description, priceMinor, imageUrl, available, createdAt, updatedAt }`.
 Order shape: `{ id, customerId, paintingId, paintingTitle, priceMinor, status, createdAt, updatedAt, cancelledAt, customerEmail? }`.
+`customerId` is always a 24-character hex ObjectId string, regardless of population.
 Order statuses: `placed | cancelled`. Customer ownership is strictly derived from server session.
 
 ## Concurrency and database indexes

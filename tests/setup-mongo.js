@@ -7,13 +7,23 @@ import { Painting } from '../server/models/Painting.js';
 import { Order } from '../server/models/Order.js';
 
 let replSetInstance = null;
-const systemPath = 'C:\\Program Files\\MongoDB\\Server\\8.3\\bin\\mongod.exe';
-const systemBinary = fs.existsSync(systemPath) ? systemPath : undefined;
+
+function getBinaryConfig() {
+  const customBinary = process.env.MONGOMS_SYSTEM_BINARY;
+  if (customBinary) {
+    return { systemBinary: customBinary };
+  }
+  const winDefault = 'C:\\Program Files\\MongoDB\\Server\\8.3\\bin\\mongod.exe';
+  if (process.platform === 'win32' && fs.existsSync(winDefault)) {
+    return { systemBinary: winDefault, version: '8.3.4' };
+  }
+  return {};
+}
 
 export async function setupTestReplSet() {
   if (!replSetInstance) {
     replSetInstance = await MongoMemoryReplSet.create({
-      binary: systemBinary ? { systemBinary } : {},
+      binary: getBinaryConfig(),
       replSet: { count: 1 },
     });
   }

@@ -11,6 +11,18 @@ let testUri = '';
 beforeAll(async () => {
   const setup = await setupTestReplSet();
   testUri = setup.uri;
+
+  // Controlled SPA fixture ensuring the test is deterministic and independent of build execution order
+  const distDir = path.resolve('dist');
+  const distIndex = path.join(distDir, 'index.html');
+  if (!fs.existsSync(distIndex)) {
+    fs.mkdirSync(distDir, { recursive: true });
+    fs.writeFileSync(
+      distIndex,
+      '<!doctype html><html><head><title>Atelier Art Studio</title></head><body><div id="root">Atelier SPA Root</div></body></html>',
+      'utf8'
+    );
+  }
 });
 
 afterAll(async () => {
@@ -41,21 +53,18 @@ describe('Frontend and Backend routing contracts', () => {
 
   it('serves SPA index.html for non-API client routes so React Router can display 404 or page', async () => {
     const app = freshApp();
-    const distIndex = path.resolve('dist/index.html');
-    if (!fs.existsSync(distIndex)) {
-      // In case dist hasn't been built yet
-      return;
-    }
 
     // Home route
     const homeRes = await request(app).get('/');
     expect(homeRes.status).toBe(200);
     expect(homeRes.headers['content-type']).toMatch(/html/);
+    expect(homeRes.text).toContain('<!doctype html>');
 
-    // Deep non-API route (e.g. unknown route that React Router will catch as 404)
+    // Deep non-API route (unknown route that React Router catches as 404)
     const unknownRes = await request(app).get('/unknown-studio-page');
     expect(unknownRes.status).toBe(200);
     expect(unknownRes.headers['content-type']).toMatch(/html/);
+    expect(unknownRes.text).toContain('<!doctype html>');
 
     // Client routes
     const buyerRes = await request(app).get('/buyer');

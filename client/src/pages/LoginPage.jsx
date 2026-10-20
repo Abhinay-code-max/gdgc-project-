@@ -35,6 +35,8 @@ export function LoginPage({ user, onAuthenticated }) {
           setError('Google OAuth is not configured on this server. Please use email and password.');
         } else if (oauthError === 'unverified_email') {
           setError('Your Google email address is not verified. Please use a verified account.');
+        } else if (oauthError === 'oauth_csrf_rejected') {
+          setError('Authentication state was invalid or expired (CSRF protection). Please try again.');
         } else if (oauthError === 'oauth_denied') {
           setError('Google authentication was cancelled.');
         } else {

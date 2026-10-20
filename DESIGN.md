@@ -20,6 +20,8 @@ The server stores application data in MongoDB using Mongoose 9, with session sto
 backed by MongoDB via `connect-mongo`. Data integrity and concurrency are guaranteed through
 MongoDB multi-document transactions and a partial unique index on orders
 (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`).
+Standalone MongoDB deployments that do not support transactions are rejected with an explicit
+error.
 
 Success responses use `{ "data": ... }`. Errors use a stable code and human-readable
 message under `error`, with optional field errors. Money is always an integer number
@@ -35,23 +37,26 @@ In the user interface, these roles are presented as **Buyer** and **Seller**.
 Public registration always creates a `customer` (Buyer). The sole `studio` (Seller) account is
 created by the idempotent seed command.
 
-Google OAuth flow:
-- `GET /api/auth/google` starts the flow.
-- `GET /api/auth/google/callback` processes provider callback.
+Google OAuth security and flow:
+- `GET /api/auth/google` creates a cryptographically secure 32-byte session-bound `state` nonce and starts the flow.
+- `GET /api/auth/google/callback` strictly checks `req.query.state` against `req.session.oauthState` before continuing, mitigating login-CSRF attacks.
+- Authoritative email claims: requires Google's verified email claim (`profile._json.email_verified === true` or explicit `verified: true` in `emails`), matching the normalized email. Missing or false claims are rejected with `unverified_email`.
+- Malformed or missing emails are rejected with `invalid_email`.
 - New Google users are automatically assigned the `customer` (Buyer) role.
-- Only provider-verified emails are trusted.
 - If a verified Google email matches an existing account (including studio), it is safely linked
   without altering its existing role. Google users can never inject or escalate to the studio role.
 - Missing Google credentials are handled gracefully: the application displays a helpful
   configuration message without crashing.
+- Verification status: The Google OAuth implementation is automated-test verified using mocked provider responses; live end-to-end authentication with Google remains pending until real credentials and production callback URLs are supplied.
 
 Server middleware is the authority: missing authentication returns `401`, a wrong role returns
 `403`, and a customer asking for another customer's order receives `404`. Purchase and
 cancellation ownership always comes from the server session; the client never supplies a customer ID.
 
-## Rate limiting
+## Rate limiting & proxy trust
 
 Configured via `express-rate-limit`:
+- `trust proxy`: Defaults to `false` for direct or local exposure to prevent `X-Forwarded-For` rate-limit spoofing. Configurable via `TRUST_PROXY` (e.g. `1` or `true`) when running behind reverse proxies.
 - Standard API limiter on `/api/*` (300 req / 15 min).
 - Strict auth limiter on registration and password login (10 req / 15 min).
 - OAuth limiter on initiation and callback endpoints (25 req / 15 min).
@@ -71,6 +76,10 @@ Cancellation updates only the owned placed order to `cancelled` with `cancelledA
 Because availability is derived, the painting becomes immediately purchasable again.
 Studio editing uses the same atomic lock and rejects a sold painting with `409 PAINTING_SOLD`.
 
+Order serialization is stable: `orderJson` always returns a 24-character hex `customerId`
+string regardless of whether the customer relationship was populated or unpopulated, and
+supplies `customerEmail` when accessed by studio sellers.
+
 ## Interface and loading experience
 
 - Dedicated pages: `/` (Home), `/login` (Login), `/register` (Registration), `/gallery` (Paintings),
@@ -84,28 +93,35 @@ Studio editing uses the same atomic lock and rejects a sold painting with `409 P
 
 Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
 
-- `npm test`: 4 test suites and 16 tests passed with zero failures.
+- `npm test`: 4 test files and 22 tests passed with zero failures and zero warnings.
   1. Production session secret validation (rejects missing or <32 characters in production mode);
   2. MongoDB connection failure provides clear startup error;
-  3. Customer-only public registration, session persistence, logout, and login;
-  4. Duplicate account rejection, credential checks, and mutation origin protection;
-  5. Google OAuth verified email checking, customer assignment, and unverified email rejection;
-  6. Safe Google account linking to existing studio account without role modification;
-  7. Missing OAuth configuration handled safely;
-  8. Authentication rate limiting returning HTTP 429 with `RATE_LIMITED` code;
-  9. Backend API 404 returning JSON `ROUTE_NOT_FOUND`;
-  10. Required MongoDB indexes verified (including partial unique index on placed orders);
-  11. Public browsing and studio mutation validation;
-  12. Concurrent purchase collision test (one winner 201, one conflict 409 `PAINTING_UNAVAILABLE`);
-  13. Sold painting edit rejection (409 `PAINTING_SOLD`);
-  14. Ownership hiding (404 `ORDER_NOT_FOUND`), price snapshot immutability, and cancellation/repurchase restoration;
-  15. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
-  16. Frontend routing contract (SPA index.html served for client routes and JSON for API routes).
-- `npm run build`: Vite 7 production bundle built successfully.
-- `npm --prefix client run lint`: oxlint passed with 0 warnings and 0 errors across all 14 files.
+  3. Standalone MongoDB topology without transaction support is explicitly rejected;
+  4. Customer-only public registration, session persistence, logout, and login;
+  5. Duplicate account rejection, credential checks, and mutation origin protection;
+  6. Authoritative Google email verification accepted;
+  7. Google unverified email (`verified: false`) rejected;
+  8. Missing Google verification claim rejected;
+  9. Malformed or missing Google email rejected;
+  10. Safe Google account linking to existing studio account without role modification;
+  11. Session-bound CSRF state creation upon OAuth initiation;
+  12. Missing OAuth callback state rejected;
+  13. Mismatched OAuth callback state rejected;
+  14. Rate-limit spoofing prevented under default `trustProxy: false`;
+  15. Reverse-proxy forwarding headers respected under configured `trustProxy`;
+  16. Missing OAuth configuration handled safely;
+  17. Required MongoDB indexes verified (including partial unique index on placed orders);
+  18. Public browsing and studio mutation validation;
+  19. Concurrent purchase collision test (one winner 201, one conflict 409 `PAINTING_UNAVAILABLE`);
+  20. Sold painting edit rejection (409 `PAINTING_SOLD`);
+  21. Ownership hiding (404 `ORDER_NOT_FOUND`), stable `customerId` string serialization, price snapshot immutability, and cancellation/repurchase restoration;
+  22. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
+  23. Frontend routing contract (SPA index.html served for client routes and JSON for API routes).
+- `npm run build`: Vite 7 production bundle built successfully without relying on separate client submodules.
+- `npm run lint`: oxlint passed with 0 warnings and 0 errors across all 13 client files.
 - `npm run db:init`: Idempotent index initialization completed successfully.
 - `npm run db:seed`: Idempotent seeding completed successfully.
-- Concurrency and transaction tests run against in-memory replica set (`MongoMemoryReplSet`).
+- Concurrency and transaction tests run against portable in-memory replica set (`MongoMemoryReplSet`).
 
 ## Five-minute demonstration
 

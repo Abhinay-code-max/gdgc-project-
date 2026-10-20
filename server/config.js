@@ -2,6 +2,19 @@ import 'dotenv/config';
 
 const isProduction = process.env.NODE_ENV === 'production';
 
+function parseTrustProxy(val) {
+  if (val === undefined || val === null || val === '' || val === 'false') {
+    return false; // Default: no trusted proxy for local/direct exposure
+  }
+  if (val === 'true') {
+    return true;
+  }
+  if (/^\d+$/.test(val)) {
+    return Number(val);
+  }
+  return val;
+}
+
 export function getConfig(overrides = {}) {
   const prodFlag = overrides.isProduction ?? isProduction;
   let sessionSecret = overrides.sessionSecret;
@@ -17,11 +30,13 @@ export function getConfig(overrides = {}) {
 
   const mongodbUri = overrides.mongodbUri ?? process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017';
   const mongodbDbName = overrides.mongodbDbName ?? process.env.MONGODB_DB_NAME ?? 'art_studio';
+  const trustProxy = overrides.trustProxy !== undefined ? overrides.trustProxy : parseTrustProxy(process.env.TRUST_PROXY);
 
   return {
     port: Number(overrides.port ?? process.env.PORT ?? 3000),
     mongodbUri,
     mongodbDbName,
+    trustProxy,
     appOrigin: overrides.appOrigin ?? process.env.APP_ORIGIN ?? 'http://localhost:5173',
     serverOrigin: overrides.serverOrigin ?? process.env.SERVER_ORIGIN ?? 'http://localhost:3000',
     googleClientId: overrides.googleClientId ?? process.env.GOOGLE_CLIENT_ID ?? '',

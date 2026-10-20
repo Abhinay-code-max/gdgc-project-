@@ -38,26 +38,26 @@ export async function closeDatabase() {
 }
 
 export async function runInTransaction(work) {
+  const topologyType = mongoose.connection.client?.topology?.description?.type;
   const isReplica = Boolean(
     mongoose.connection.client?.topology?.description?.setName ||
-    ['ReplicaSetWithPrimary', 'ReplicaSetNoPrimary', 'Sharded'].includes(
-      mongoose.connection.client?.topology?.description?.type
-    )
+    ['ReplicaSetWithPrimary', 'ReplicaSetNoPrimary', 'Sharded'].includes(topologyType)
   );
 
-  if (isReplica) {
-    const session = await mongoose.startSession();
-    try {
-      let result;
-      await session.withTransaction(async () => {
-        result = await work(session);
-      });
-      return result;
-    } finally {
-      await session.endSession();
-    }
+  if (!isReplica) {
+    throw new Error(
+      `MongoDB transactions are required for atomic purchase and cancellation operations, but the connected deployment topology '${topologyType || 'Standalone'}' does not support transactions. Use a replica set or MongoDB Atlas.`
+    );
   }
 
-  // Fallback for standalone mongo instances without replica set
-  return await work(null);
+  const session = await mongoose.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      result = await work(session);
+    });
+    return result;
+  } finally {
+    await session.endSession();
+  }
 }

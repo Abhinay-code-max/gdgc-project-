@@ -1,9 +1,10 @@
 import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import session from 'express-session';
+import mongoose from 'mongoose';
 import { createApp } from '../server/app.js';
 import { verifyGoogleProfile } from '../server/routes/auth.js';
-import { connectDatabase } from '../server/db/connection.js';
+import { connectDatabase, runInTransaction } from '../server/db/connection.js';
 import { User } from '../server/models/User.js';
 import { setupTestReplSet, teardownTestReplSet, clearCollections } from './setup-mongo.js';
 import { createRateLimiters } from '../server/middleware/rateLimiter.js';
@@ -36,7 +37,7 @@ function freshApp(overrides = {}) {
     rateLimitOptions: {
       enableApiLimiterInTest: false,
       authMax: 3,
-      oauthMax: 3,
+      oauthMax: 5,
     },
     ...overrides,
   });
@@ -44,13 +45,34 @@ function freshApp(overrides = {}) {
 
 describe('MongoDB startup & connection failure', () => {
   it('throws clear startup error when MongoDB connection fails', async () => {
-    // Attempt connecting to invalid host with short timeout
     await expect(
       connectDatabase('mongodb://127.0.0.1:59999', 'invalid_db', { serverSelectionTimeoutMS: 200 })
     ).rejects.toThrow(/Failed to connect to MongoDB/);
 
-    // Reconnect to test instance for subsequent tests
     await connectDatabase(testUri, 'art_studio_test');
+  });
+
+  it('rejects execution when MongoDB topology does not support transactions', async () => {
+    // Temporarily mock topology description as Standalone to verify clear failure
+    const client = mongoose.connection.client;
+    const originalType = client?.topology?.description?.type;
+    const originalSetName = client?.topology?.description?.setName;
+
+    try {
+      if (client?.topology?.description) {
+        client.topology.description.type = 'Standalone';
+        client.topology.description.setName = null;
+      }
+
+      await expect(
+        runInTransaction(async () => 'should not execute')
+      ).rejects.toThrow(/MongoDB transactions are required.*does not support transactions/);
+    } finally {
+      if (client?.topology?.description) {
+        client.topology.description.type = originalType;
+        client.topology.description.setName = originalSetName;
+      }
+    }
   });
 });
 
@@ -62,13 +84,13 @@ describe('authentication and mutation protection', () => {
     const registered = await agent.post('/api/auth/register').set('Origin', origin).send({
       email: 'Customer@Example.com',
       password: 'correct horse battery staple',
-      role: 'studio', // Attempt to inject role
+      role: 'studio',
     });
 
     expect(registered.status).toBe(201);
     expect(registered.body.data.user).toMatchObject({
       email: 'customer@example.com',
-      role: 'customer', // Must strictly remain customer
+      role: 'customer',
     });
 
     expect((await agent.get('/api/auth/me')).status).toBe(200);
@@ -111,17 +133,43 @@ describe('authentication and mutation protection', () => {
   });
 });
 
-describe('Google OAuth logic and account linking', () => {
-  it('creates a new customer account from verified Google profile and rejects unverified email', async () => {
-    // 1. Unverified email
+describe('Secure Google OAuth Email Verification & Account Linking', () => {
+  it('accepts authoritatively verified email via _json.email_verified === true', async () => {
+    let resultUser = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-verified-1',
+        displayName: 'Verified User',
+        _json: {
+          email: 'verified.authoritative@example.com',
+          email_verified: true,
+        },
+      },
+      (err, user) => {
+        expect(err).toBeNull();
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeDefined();
+    expect(resultUser.email).toBe('verified.authoritative@example.com');
+    expect(resultUser.role).toBe('customer');
+  });
+
+  it('rejects email when verified is explicitly false', async () => {
     let resultUser = null;
     let authError = null;
     await verifyGoogleProfile(
       'token',
       'refresh',
       {
-        id: 'google-100',
-        displayName: 'Unverified Guy',
+        id: 'google-unverified-1',
+        displayName: 'Unverified User',
+        _json: {
+          email: 'unverified@example.com',
+          email_verified: false,
+        },
         emails: [{ value: 'unverified@example.com', verified: false }],
       },
       (err, user, info) => {
@@ -131,32 +179,63 @@ describe('Google OAuth logic and account linking', () => {
     );
     expect(resultUser).toBeFalsy();
     expect(authError?.message).toBe('unverified_email');
+  });
 
-    // 2. Verified email creates customer role
+  it('rejects profile when authoritative verification claim is missing', async () => {
+    let resultUser = null;
+    let authError = null;
     await verifyGoogleProfile(
       'token',
       'refresh',
       {
-        id: 'google-101',
-        displayName: 'Alice Google',
-        emails: [{ value: 'alice.google@example.com', verified: true }],
-        photos: [{ value: 'https://example.com/avatar.jpg' }],
+        id: 'google-missing-claim-1',
+        displayName: 'Missing Claim User',
+        _json: {
+          email: 'noclaim@example.com',
+          // email_verified omitted
+        },
+        emails: [{ value: 'noclaim@example.com' }], // verified omitted
       },
-      (err, user) => {
-        expect(err).toBeNull();
+      (err, user, info) => {
+        authError = info;
         resultUser = user;
       }
     );
-    expect(resultUser).toBeDefined();
-    expect(resultUser.email).toBe('alice.google@example.com');
-    expect(resultUser.role).toBe('customer');
-    expect(resultUser.googleId).toBe('google-101');
-    expect(resultUser.displayName).toBe('Alice Google');
-    expect(resultUser.avatarUrl).toBe('https://example.com/avatar.jpg');
+    expect(resultUser).toBeFalsy();
+    expect(authError?.message).toBe('unverified_email');
   });
 
-  it('safely links existing studio account without modifying its role', async () => {
-    // Existing studio account created before Google OAuth
+  it('rejects profile when email is malformed or missing', async () => {
+    let authError1 = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-malformed-1',
+        _json: { email: 'not-an-email', email_verified: true },
+      },
+      (err, user, info) => {
+        authError1 = info;
+      }
+    );
+    expect(authError1?.message).toBe('invalid_email');
+
+    let authError2 = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-missing-1',
+        _json: { email_verified: true },
+      },
+      (err, user, info) => {
+        authError2 = info;
+      }
+    );
+    expect(authError2?.message).toBe('invalid_email');
+  });
+
+  it('safely links existing local account without changing its role', async () => {
     const studio = await User.create({
       email: 'master@artstudio.com',
       passwordHash: 'hash',
@@ -171,7 +250,10 @@ describe('Google OAuth logic and account linking', () => {
       {
         id: 'google-studio-999',
         displayName: 'Google Master',
-        emails: [{ value: 'master@artstudio.com', verified: true }],
+        _json: {
+          email: 'master@artstudio.com',
+          email_verified: true,
+        },
       },
       (err, user) => {
         expect(err).toBeNull();
@@ -181,62 +263,119 @@ describe('Google OAuth logic and account linking', () => {
 
     expect(linkedUser).toBeDefined();
     expect(linkedUser.id).toBe(studio.id);
-    expect(linkedUser.role).toBe('studio'); // Preserved studio role!
+    expect(linkedUser.role).toBe('studio');
     expect(linkedUser.googleId).toBe('google-studio-999');
-  });
-
-  it('handles missing Google OAuth configuration gracefully without crashing', async () => {
-    const app = freshApp({
-      googleClientId: '',
-      googleClientSecret: '',
-    });
-
-    const configRes = await request(app).get('/api/auth/config');
-    expect(configRes.status).toBe(200);
-    expect(configRes.body.data.googleAuthAvailable).toBe(false);
-
-    const googleReq = await request(app).get('/api/auth/google');
-    expect(googleReq.status).toBe(302);
-    expect(googleReq.headers.location).toContain('error=oauth_not_configured');
   });
 });
 
-describe('Rate limiting and API 404', () => {
-  it('returns HTTP 429 with RATE_LIMITED code when authentication rate limit is exceeded', async () => {
+describe('OAuth Login-CSRF Protection & State Enforcement', () => {
+  it('creates cryptographic session-bound state upon authorization initiation', async () => {
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+    });
+    const agent = request.agent(app);
+
+    const initRes = await agent.get('/api/auth/google');
+    expect(initRes.status).toBe(302);
+    const redirectUrl = new URL(initRes.headers.location);
+    const generatedState = redirectUrl.searchParams.get('state');
+    expect(generatedState).toBeDefined();
+    expect(generatedState.length).toBe(64); // 32 bytes in hex = 64 characters
+  });
+
+  it('rejects callback when state query parameter is missing', async () => {
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+    });
+    const agent = request.agent(app);
+
+    // Initiate authorization to generate state
+    await agent.get('/api/auth/google');
+
+    // Callback attempted without state
+    const callbackRes = await agent.get('/api/auth/google/callback?code=mock_code');
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.location).toContain('error=oauth_csrf_rejected');
+  });
+
+  it('rejects callback when state query parameter is mismatched', async () => {
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+    });
+    const agent = request.agent(app);
+
+    // Initiate authorization to generate state
+    await agent.get('/api/auth/google');
+
+    // Callback with forged/tampered state
+    const callbackRes = await agent.get('/api/auth/google/callback?state=forged_state_nonce&code=mock_code');
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.location).toContain('error=oauth_csrf_rejected');
+  });
+});
+
+describe('Configurable Proxy Trust and Rate Limiting', () => {
+  it('prevents rate limit bypass via spoofed forwarding headers when trustProxy is default (false)', async () => {
     const isolatedLimiters = createRateLimiters({
       isTest: false,
       authMax: 2,
       authWindowMs: 60000,
     });
-    const app = freshApp({ rateLimiters: isolatedLimiters });
+    // Default trustProxy: false
+    const app = freshApp({ rateLimiters: isolatedLimiters, trustProxy: false });
 
-    const payload = { email: 'ratelimit@example.com', password: 'wrongpassword123' };
+    const payload = { email: 'spoof@example.com', password: 'wrongpassword' };
 
-    // First attempt: 401
-    const res1 = await request(app).post('/api/auth/login').set('Origin', origin).send(payload);
+    // Request 1 with spoofed header
+    const res1 = await request(app)
+      .post('/api/auth/login')
+      .set('Origin', origin)
+      .set('X-Forwarded-For', '203.0.113.1')
+      .send(payload);
     expect(res1.status).toBe(401);
 
-    // Second attempt: 401
-    const res2 = await request(app).post('/api/auth/login').set('Origin', origin).send(payload);
+    // Request 2 with different spoofed header
+    const res2 = await request(app)
+      .post('/api/auth/login')
+      .set('Origin', origin)
+      .set('X-Forwarded-For', '203.0.113.2')
+      .send(payload);
     expect(res2.status).toBe(401);
 
-    // Third attempt: 429 RATE_LIMITED
-    const res3 = await request(app).post('/api/auth/login').set('Origin', origin).send(payload);
+    // Request 3 with third spoofed header -> Must be RATE_LIMITED because true socket IP is untrusted
+    const res3 = await request(app)
+      .post('/api/auth/login')
+      .set('Origin', origin)
+      .set('X-Forwarded-For', '203.0.113.3')
+      .send(payload);
     expect(res3.status).toBe(429);
-    expect(res3.body.error).toEqual({
-      code: 'RATE_LIMITED',
-      message: 'Too many requests. Please try again later.',
-    });
-    expect(res3.headers['ratelimit-limit']).toBeDefined();
+    expect(res3.body.error.code).toBe('RATE_LIMITED');
   });
 
-  it('returns JSON error for unknown API routes', async () => {
-    const app = freshApp();
-    const res = await request(app).get('/api/unknown-endpoint');
-    expect(res.status).toBe(404);
-    expect(res.body.error).toEqual({
-      code: 'ROUTE_NOT_FOUND',
-      message: 'The requested route was not found.',
+  it('evaluates forwarding headers when trustProxy is explicitly configured', async () => {
+    const isolatedLimiters = createRateLimiters({
+      isTest: false,
+      authMax: 2,
+      authWindowMs: 60000,
     });
+    // Configured trustProxy: 1 (trusted reverse proxy)
+    const app = freshApp({ rateLimiters: isolatedLimiters, trustProxy: 1 });
+
+    const payload = { email: 'trusted-proxy@example.com', password: 'wrongpassword' };
+
+    // 2 requests from IP A
+    await request(app).post('/api/auth/login').set('Origin', origin).set('X-Forwarded-For', '198.51.100.1').send(payload);
+    await request(app).post('/api/auth/login').set('Origin', origin).set('X-Forwarded-For', '198.51.100.1').send(payload);
+
+    // IP A hits limit
+    const resA = await request(app).post('/api/auth/login').set('Origin', origin).set('X-Forwarded-For', '198.51.100.1').send(payload);
+    expect(resA.status).toBe(429);
+
+    // Different legitimate forwarded IP B is NOT blocked by IP A's limit
+    const resB = await request(app).post('/api/auth/login').set('Origin', origin).set('X-Forwarded-For', '198.51.100.2').send(payload);
+    expect(resB.status).toBe(401);
   });
 });

@@ -2,12 +2,18 @@
   "name": "art-studio-prototype",
   "private": true,
   "type": "module",
+  "config": {
+    "mongodbMemoryServer": {
+      "disablePostinstall": "1"
+    }
+  },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "node --watch server/index.js",
     "dev:client": "vite --config client/vite.config.js",
     "start": "node server/index.js",
     "build": "vite build --config client/vite.config.js",
+    "lint": "oxlint -c client/.oxlintrc.json client/src",
     "test": "vitest run tests/auth.test.js tests/paintings-orders.integration.test.js tests/e2e-journey.test.js tests/routing-and-views.test.js",
     "test:watch": "vitest",
     "db:init": "node server/init-db.js",
@@ -28,13 +34,15 @@
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.2.1",
     "jsdom": "^27.0.1",
     "mongodb-memory-server": "^11.1.0",
+    "oxlint": "^1.89.0",
     "supertest": "^7.1.4",
     "vite": "^7.1.9",
     "vitest": "^3.2.4"

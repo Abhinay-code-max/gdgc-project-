@@ -4,8 +4,8 @@ import session from 'express-session';
 import MongoStore from 'connect-mongo';
 import helmet from 'helmet';
 import mongoose from 'mongoose';
+import passport from 'passport';
 import { getConfig } from './config.js';
-import { connectDatabase } from './db/connection.js';
 import { createAuthRouter } from './routes/auth.js';
 import { createPaintingsRouter } from './routes/paintings.js';
 import { createOrdersRouter } from './routes/orders.js';
@@ -16,8 +16,13 @@ export function createApp(overrides = {}) {
   const config = getConfig(overrides);
   const app = express();
 
-  // Trust proxy for rate limiting and secure cookies in reverse-proxy environments
-  app.set('trust proxy', 1);
+  // Configurable proxy trust (defaults to false for local/direct exposure)
+  if (config.trustProxy !== false) {
+    app.set('trust proxy', config.trustProxy);
+  } else {
+    app.set('trust proxy', false);
+  }
+
   app.disable('x-powered-by');
   app.use(helmet({ crossOriginResourcePolicy: false }));
   app.use(express.json({ limit: '32kb' }));
@@ -53,6 +58,9 @@ export function createApp(overrides = {}) {
     store: sessionStore,
   };
   app.use(session(sessionOptions));
+
+  // Initialize passport middleware after session
+  app.use(passport.initialize());
 
   // Mutation origin check
   app.use((req, res, next) => {

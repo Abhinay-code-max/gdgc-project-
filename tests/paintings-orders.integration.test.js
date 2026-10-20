@@ -153,7 +153,9 @@ describe('purchase, cancellation, and order authorization', () => {
     expect(bought.status).toBe(201);
     expect(bought.body.data).toMatchObject({ priceMinor: 234500, status: 'placed' });
     expect(bought.body.data).not.toHaveProperty('customerEmail');
+    expect(bought.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
     const orderId = bought.body.data.id;
+    const buyerId = bought.body.data.customerId;
 
     // Ownership hiding: 404 instead of 403
     expect((await other.get(`/api/orders/${orderId}`)).status).toBe(404);
@@ -162,11 +164,23 @@ describe('purchase, cancellation, and order authorization', () => {
 
     const ownerOrders = await owner.get('/api/orders');
     expect(ownerOrders.body.data).toHaveLength(1);
+    expect(ownerOrders.body.data[0].customerId).toBe(buyerId);
     expect((await other.get('/api/orders')).body.data).toEqual([]);
 
+    // Seller order detail covers both customerId string and customerEmail
     const studioDetail = await studio.get(`/api/orders/${orderId}`);
     expect(studioDetail.status).toBe(200);
+    expect(studioDetail.body.data.customerId).toBe(buyerId);
+    expect(studioDetail.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
     expect(studioDetail.body.data.customerEmail).toBe('owner@example.com');
+
+    // Seller order list covers both customerId string and customerEmail
+    const studioOrders = await studio.get('/api/orders');
+    expect(studioOrders.status).toBe(200);
+    expect(studioOrders.body.data).toHaveLength(1);
+    expect(studioOrders.body.data[0].customerId).toBe(buyerId);
+    expect(studioOrders.body.data[0].customerId).toMatch(/^[0-9a-fA-F]{24}$/);
+    expect(studioOrders.body.data[0].customerEmail).toBe('owner@example.com');
 
     const cancelled = await owner.post(`/api/orders/${orderId}/cancel`).set('Origin', origin);
     expect(cancelled.status).toBe(200);
@@ -184,6 +198,8 @@ describe('purchase, cancellation, and order authorization', () => {
     const repurchased = await other.post(`/api/paintings/${painting.id}/purchase`).set('Origin', origin);
     expect(repurchased.status).toBe(201);
     expect(repurchased.body.data.priceMinor).toBe(300000);
+    expect(repurchased.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
+    expect(repurchased.body.data.customerId).not.toBe(buyerId);
 
     // Initial order snapshot remains unchanged
     expect((await owner.get(`/api/orders/${orderId}`)).body.data.priceMinor).toBe(234500);

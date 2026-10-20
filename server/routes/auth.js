@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import passport from 'passport';
@@ -32,16 +33,33 @@ export const establishSession = (req, user) =>
 
 export async function verifyGoogleProfile(accessToken, refreshToken, profile, done) {
   try {
-    const verifiedEntry = profile.emails?.find(
-      (e) => e.verified === true || e.verified === 'true' || (e.verified === undefined && e.value)
-    );
-    const email = verifiedEntry?.value ? verifiedEntry.value.trim().toLowerCase() : null;
+    // 1. Authoritative normalized email extraction
+    const rawEmail = typeof profile?._json?.email === 'string'
+      ? profile._json.email
+      : (profile?.emails?.[0]?.value ? profile.emails[0].value : null);
 
-    if (!email) {
+    const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : null;
+
+    // Check for malformed or missing email
+    if (!email || !emailPattern.test(email)) {
+      return done(null, false, { message: 'invalid_email' });
+    }
+
+    // 2. Strict authoritative verification from Google claim
+    const jsonVerified = profile._json?.email_verified === true;
+    const arrayVerified = Boolean(
+      profile.emails?.some(
+        (e) => (e.verified === true || e.verified === 'true') &&
+          typeof e.value === 'string' &&
+          e.value.trim().toLowerCase() === email
+      )
+    );
+
+    if (!jsonVerified && !arrayVerified) {
       return done(null, false, { message: 'unverified_email' });
     }
 
-    // 1. Check if user already exists with this googleId
+    // 3. Check if user already exists with this googleId
     let user = await User.findOne({ googleId: profile.id });
     if (user) {
       let updated = false;
@@ -57,7 +75,7 @@ export async function verifyGoogleProfile(accessToken, refreshToken, profile, do
       return done(null, user);
     }
 
-    // 2. Check if account already exists with matching email -> safe linking
+    // 4. Safe account linking: if verified email matches existing account, link safely WITHOUT changing role
     user = await User.findOne({ email });
     if (user) {
       user.googleId = profile.id;
@@ -67,12 +85,12 @@ export async function verifyGoogleProfile(accessToken, refreshToken, profile, do
       if (!user.avatarUrl && profile.photos?.[0]?.value) {
         user.avatarUrl = profile.photos[0].value;
       }
-      // Never change existing role!
+      // Never change existing role (preserves customer or studio)
       await user.save();
       return done(null, user);
     }
 
-    // 3. New user from Google: always customer role
+    // 5. New user from Google: always customer role (no tokens stored)
     user = await User.create({
       email,
       googleId: profile.id,
@@ -211,16 +229,25 @@ export function createAuthRouter({ config, rateLimiters = {}, passportInstance =
     return res.json({ data: { user: req.session.user } });
   });
 
-  // Google OAuth Routes
+  // Google OAuth Routes with CSRF State Protection
   router.get('/google', oauthLimiter, (req, res, next) => {
     if (!hasGoogleConfig) {
       return res.redirect(`${config.appOrigin}/login?error=oauth_not_configured`);
     }
-    passportInstance.authenticate('google', {
-      scope: ['profile', 'email'],
-      prompt: 'select_account',
-      session: false,
-    })(req, res, next);
+
+    // Generate cryptographically secure state nonce bound to session
+    const state = crypto.randomBytes(32).toString('hex');
+    req.session.oauthState = state;
+    req.session.save((saveErr) => {
+      if (saveErr) return next(saveErr);
+
+      passportInstance.authenticate('google', {
+        scope: ['profile', 'email'],
+        prompt: 'select_account',
+        state,
+        session: false,
+      })(req, res, next);
+    });
   });
 
   router.get('/google/callback', oauthLimiter, (req, res, next) => {
@@ -228,12 +255,26 @@ export function createAuthRouter({ config, rateLimiters = {}, passportInstance =
       return res.redirect(`${config.appOrigin}/login?error=oauth_not_configured`);
     }
 
+    // Verify session-bound OAuth state against incoming state query parameter
+    const sessionState = req.session?.oauthState;
+    const queryState = typeof req.query?.state === 'string' ? req.query.state : null;
+
+    if (!sessionState || !queryState || sessionState !== queryState) {
+      if (req.session) delete req.session.oauthState;
+      return res.redirect(`${config.appOrigin}/login?error=oauth_csrf_rejected`);
+    }
+
+    // Single-use state nonce consumption
+    delete req.session.oauthState;
+
     passportInstance.authenticate('google', { session: false }, async (err, user, info) => {
       if (err) {
         return res.redirect(`${config.appOrigin}/login?error=oauth_failed`);
       }
       if (!user) {
-        const errorReason = info?.message === 'unverified_email' ? 'unverified_email' : 'oauth_denied';
+        const errorReason = info?.message === 'unverified_email'
+          ? 'unverified_email'
+          : (info?.message === 'invalid_email' ? 'invalid_email' : 'oauth_denied');
         return res.redirect(`${config.appOrigin}/login?error=${errorReason}`);
       }
 

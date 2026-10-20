@@ -6,10 +6,10 @@ A full-stack art studio and gallery application for discovering and collecting o
 
 ## Architecture & Technology Stack
 
-- **Runtime & Backend:** Node.js 20+, Express 5, Mongoose 9, MongoDB Atlas / local MongoDB, `express-session` with `connect-mongo`.
-- **Authentication:** Passport.js Google OAuth 2.0 strategy (`passport-google-oauth20`) alongside bcrypt-hashed email/password credentials.
-- **Security & Reliability:** `helmet`, `express-rate-limit`, SameSite HTTP-only session cookies, server-authoritative role checks, and origin verification on state-changing requests.
-- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership.
+- **Runtime & Backend:** Node.js 20+, Express 5, Mongoose 9, MongoDB Atlas / local replica set, `express-session` with `connect-mongo`.
+- **Authentication:** Passport.js Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` protection and verified-email claims, alongside bcrypt-hashed email/password credentials.
+- **Security & Reliability:** `helmet`, `express-rate-limit`, configurable proxy trust, SameSite HTTP-only session cookies, server-authoritative role checks, and origin verification on state-changing requests.
+- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership. Standalone topologies without transaction support are explicitly rejected.
 - **Frontend:** React 19, Vite 7, React Router 7 (`react-router-dom`), custom accessible animated-logo loader, responsive DM Sans / Playfair Display styling.
 
 ---
@@ -29,11 +29,12 @@ Copy `.env.example` to `.env` and configure the values:
 
 ```env
 PORT=3000
-MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
 MONGODB_DB_NAME=art_studio
 SESSION_SECRET=replace-with-at-least-32-random-characters-secret
 APP_ORIGIN=http://localhost:5173
 SERVER_ORIGIN=http://localhost:3000
+TRUST_PROXY=false
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=
 GOOGLE_CALLBACK_URL=http://localhost:3000/api/auth/google/callback
@@ -45,26 +46,36 @@ STUDIO_PASSWORD=replace-with-a-strong-studio-password-min-12-chars
 
 ---
 
-## Database Setup
+## Database Setup & Replica Set Requirement
+
+MongoDB transactions require a replica set or MongoDB Atlas deployment. Standalone MongoDB topologies that do not support transactions are rejected at runtime.
 
 ### 1. MongoDB Atlas Setup (Production / Cloud Dev)
 1. Create a cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
 2. Create a database user with read/write privileges.
-3. Whitelist your IP address in Network Access (or `0.0.0.0/0` for production hosting).
+3. In **Network Access**, restrict access to your server's outbound static IP addresses or VPC peering connection (avoid using `0.0.0.0/0` in production environments).
 4. Set `MONGODB_URI` in `.env` to your connection string:
    ```env
    MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/art_studio?retryWrites=true&w=majority
    ```
 
-### 2. Local MongoDB Setup
-Ensure a MongoDB instance is running locally on port 27017:
+### 2. Local MongoDB Replica Set Setup
+To run transactions locally, start `mongod` with a replica set name:
+```bash
+mongod --replSet rs0 --dbpath <data-directory>
+```
+In your mongo shell or `mongosh`, initiate the replica set once:
+```javascript
+rs.initiate()
+```
+Then configure your URI in `.env`:
 ```env
-MONGODB_URI=mongodb://127.0.0.1:27017
+MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
 MONGODB_DB_NAME=art_studio
 ```
 
-### 3. Test Environment (No Atlas Dependency)
-Automated tests execute against an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). This provides transaction support and partial unique index validation locally and in CI without consuming Atlas resources or requiring manual setup.
+### 3. Test Environment (Zero-Config In-Memory Replica Set)
+Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). You can optionally specify a custom binary via `MONGOMS_SYSTEM_BINARY=<path-to-mongod>`. If omitted, tests portably execute without requiring external cluster setup or Atlas network dependencies.
 
 ---
 
@@ -81,13 +92,40 @@ Automated tests execute against an isolated in-memory replica set (`mongodb-memo
    - *(Note: When deploying to production later, add the production callback URL, e.g. `https://your-domain.com/api/auth/google/callback`)*
 6. Copy the generated Client ID and Client Secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
 
-> **Graceful Degradation:** If Google credentials are not provided in `.env`, the application remains fully functional with email/password authentication. The "Continue with Google" button displays a clear configuration message rather than crashing the server.
+> **Implementation & Verification Status:** The Google OAuth implementation is automated-test verified using mocked Google profiles (covering verified email claims, unverified email rejection, malformed email rejection, CSRF state enforcement, and safe account linking). Live end-to-end authentication with Google remains pending until a developer provides active Google Cloud credentials and tests against Google's live authorization endpoints.
+> If Google credentials are omitted, the application remains fully functional with email/password authentication and displays a helpful notice.
+
+---
+
+## Clean-Install and Verification Process
+
+Dependencies are consolidated at the project root so a fresh checkout can be cleanly installed and verified using standard npm commands without divergent or stale subfolder installations:
+
+```powershell
+# 1. Clean installation of all dependencies (root, server, client, linter, tests)
+npm ci
+
+# 2. Run automated test suite (22 unit, integration, and concurrency tests across 4 suites)
+npm test
+
+# 3. Build production client bundle
+npm run build
+
+# 4. Lint frontend code (0 warnings, 0 errors)
+npm run lint
+
+# 5. Initialize database indexes
+npm run db:init
+
+# 6. Seed studio account and sample fixtures
+npm run db:seed
+```
 
 ---
 
 ## Buyer & Seller Roles
 
-Internal roles are maintained as `customer` and `studio` to prevent breaking authorization middleware and API contracts:
+Internal roles are maintained as `customer` and `studio` to preserve authorization middleware and API contracts:
 - In the interface, `customer` is displayed as **Buyer** and `studio` is displayed as **Seller**.
 - **Buyer (`customer`):** Public registration and new Google OAuth users always receive the Buyer role. Buyers can browse the gallery, purchase available original paintings, view their own order history (`/buyer`), and cancel active orders.
 - **Seller (`studio`):** Controlled studio account created via `npm run db:seed`. Sellers can add paintings to the catalogue, edit unsold paintings, view sold/available statuses, and inspect all customer orders with buyer contact email addresses (`/seller`).
@@ -95,13 +133,14 @@ Internal roles are maintained as `customer` and `studio` to prevent breaking aut
 
 ---
 
-## Rate Limiting Behavior
+## Rate Limiting & Proxy Trust
 
-Configured via `express-rate-limit` with proxy trust (`app.set('trust proxy', 1)`):
-- **General API Limiter:** Protects `/api/*` against excessive traffic (300 requests / 15 min).
-- **Authentication Limiter:** Stricter limit on `/api/auth/login` and `/api/auth/register` (10 requests / 15 min).
-- **OAuth Limiter:** Protects `/api/auth/google` initiation and callback routes (25 requests / 15 min).
-- **429 Response Shape:** Returns HTTP 429 with standard headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`) and standard error body:
+Configured via `express-rate-limit` with configurable proxy trust:
+- **`TRUST_PROXY`:** Set to `false` (default) for local development or direct exposure so clients cannot spoof `X-Forwarded-For` to bypass limits. Set to `1` (or your proxy's IP) when deployed behind reverse proxies like Nginx, AWS ALB, Render, or Cloudflare.
+- **General API Limiter (`/api/*`):** 300 requests per 15-minute window.
+- **Authentication Limiter (`/api/auth/login`, `/api/auth/register`):** 10 requests per 15-minute window.
+- **OAuth Limiter (`/api/auth/google`, `/api/auth/google/callback`):** 25 requests per 15-minute window.
+- **429 Response Shape:** Returns HTTP 429 with standard headers (`RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset`) and JSON body:
   ```json
   {
     "error": {
@@ -132,48 +171,22 @@ Client routing is managed with React Router:
 
 ---
 
-## Useful Commands
-
-```powershell
-# 1. Initialize MongoDB collections and build indexes
-npm run db:init
-
-# 2. Seed controlled studio account and sample paintings
-npm run db:seed
-
-# 3. Run full test suite (16 tests across 4 suites)
-npm test
-
-# 4. Lint frontend client (oxlint, 0 errors, 0 warnings)
-npm --prefix client run lint
-
-# 5. Build production client bundle (Vite)
-npm run build
-
-# 6. Start development server (API + Vite dev server)
-npm run dev
-
-# 7. Start production API server
-npm start
-```
-
----
-
 ## Included vs. Deferred Features
 
 ### Completed:
-- Full MongoDB Atlas & Mongoose migration.
+- Full MongoDB Atlas & Mongoose migration with replica set / transaction guarantees.
 - MongoDB multi-document transactions & partial unique index on orders.
 - Single-ownership guarantee, atomic concurrency handling, cancellation, and repurchase.
-- Google OAuth 2.0 with verified email checking and safe account linking.
-- Tiered rate limiting with stable `RATE_LIMITED` 429 JSON response.
+- Google OAuth 2.0 with strict authoritative email verification claims, CSRF `state` enforcement, and safe account linking.
+- Tiered rate limiting with configurable proxy trust and stable `RATE_LIMITED` 429 JSON response.
 - Dedicated React Router routes (`/`, `/login`, `/register`, `/gallery`, `/buyer`, `/seller`, `*`).
 - Proper JSON 404 for API routes and SPA fallback for frontend routes.
 - Atelier animated-logo loader with reduced-motion support.
 - Idempotent `db:init` and `db:seed` commands.
-- 100% passing test coverage (16 tests).
+- Verified test suite: 22 tests across 4 suites passing.
 
 ### Deferred:
+- Real end-to-end Google OAuth live login (requires valid client credentials and developer configuration in Google Cloud).
 - Custom wall mural bookings (rate calculation, date exclusivity, and schedule pending official studio brief).
 - Pottery & ceramic store (glaze formulas and shipping trial pending).
 - Online payment processing (Stripe / Razorpay).
@@ -185,8 +198,8 @@ npm start
 ## Demonstration Outline (5 Minutes)
 
 1. **Introduction & Home Page (45s):** Start at `http://localhost:5173/`. Highlight the studio visual identity, animated logo loader, honest service descriptions, and live featured paintings.
-2. **Authentication & Google OAuth (60s):** Navigate to `/login`. Show the Google button (demonstrating graceful notice if credentials are unset or initiating Google OAuth flow). Log in as Seller (`studio@artstudio.com`). Show that the interface identifies the account as **Seller**.
-3. **Seller Painting Management (60s):** Navigate to `/seller`. Add a new painting ("Sunlit Terracotta", 95,000 paise). Verify it appears in the catalogue and public gallery.
-4. **Buyer Registration & Concurrent Purchase (75s):** Log out and register a new Buyer (`collector1@example.com`). Purchase "Sunlit Terracotta". Show placed order in `/buyer`. Show concurrency: attempt purchase as a second buyer to demonstrate HTTP 409 `PAINTING_UNAVAILABLE`.
-5. **Cancellation & Repurchase (45s):** As Buyer 1, cancel the order from `/buyer`. Show that the painting immediately returns to available in `/gallery`. As Buyer 2, purchase the released painting. Show that price snapshots and order history are completely preserved.
-6. **404 & Rate Limiting (15s):** Enter an unknown route (e.g. `/unknown-path`) to show the branded 404 page. Hit `/api/unknown` to show JSON 404.
+2. **Authentication & Google OAuth (60s):** Navigate to `/login`. Show the Google OAuth button and email form. Show how missing Google configuration gracefully surfaces helpful guidance. Log in with studio credentials (`studio@artstudio.com`). Show the navigation indicates **Seller**.
+3. **Seller Workspace (60s):** Navigate to `/seller`. Add a new painting. Point out that unsold paintings can be edited and appear in the gallery.
+4. **Buyer Registration & Concurrent Purchase (75s):** Open buyer window, register `buyer1@example.com`, purchase the painting. Attempt simultaneous purchase from `buyer2@example.com` to demonstrate 409 `PAINTING_UNAVAILABLE`. Show the placed order with exact price snapshot in `/buyer`.
+5. **Cancellation & Repurchase (45s):** In `/buyer`, cancel the order. Point out that `/gallery` immediately shows the painting as available again. Buyer 2 purchases it, confirming repurchase availability.
+6. **404 & Rate Limiting (15s):** Visit `/some-unknown-path` to show the branded 404 page with return links. Demonstrate rate limiting on repeated failed attempts.
