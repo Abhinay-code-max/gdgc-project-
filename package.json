@@ -2,36 +2,51 @@
   "name": "art-studio-prototype",
   "private": true,
   "type": "module",
+  "config": {
+    "mongodbMemoryServer": {
+      "disablePostinstall": "1"
+    }
+  },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "node --watch server/index.js",
     "dev:client": "vite --config client/vite.config.js",
     "start": "node server/index.js",
-    "build": "vite build --config client/vite.config.js",
-    "test": "vitest run tests/auth.test.js tests/paintings-orders.integration.test.js tests/e2e-journey.test.js",
+    "build": "cross-env NODE_ENV=production vite build --config client/vite.config.js",
+    "lint": "oxlint -c client/.oxlintrc.json client/src",
+    "test": "vitest run tests/auth.test.js tests/paintings-orders.integration.test.js tests/e2e-journey.test.js tests/routing-and-views.test.js tests/vite-warning-filter.test.js",
+    "test:system-mongo": "vitest run --no-file-parallelism tests/auth.test.js tests/paintings-orders.integration.test.js tests/e2e-journey.test.js tests/routing-and-views.test.js tests/vite-warning-filter.test.js",
     "test:watch": "vitest",
-    "db:migrate": "node server/migrate.js",
+    "db:init": "node server/init-db.js",
+    "db:migrate": "node server/init-db.js",
     "db:seed": "node server/seed.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
-    "better-sqlite3": "^12.4.1",
-    "connect-sqlite3": "^0.9.16",
+    "connect-mongo": "^5.1.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",
     "express": "^5.1.0",
+    "express-rate-limit": "^8.3.0",
     "express-session": "^1.18.2",
     "helmet": "^8.1.0",
+    "mongoose": "^9.1.2",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
     "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "react-dom": "^19.2.0",
+    "react-router-dom": "^7.18.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^5.0.4",
     "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
     "jsdom": "^27.0.1",
+    "mongodb-memory-server": "^11.1.0",
+    "oxlint": "^1.89.0",
     "supertest": "^7.1.4",
     "vite": "^7.1.9",
-    "vitest": "^3.2.4"
+    "vitest": "^5.0.5"
   }
 }

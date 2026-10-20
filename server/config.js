@@ -1,7 +1,19 @@
 import 'dotenv/config';
-import path from 'node:path';
 
 const isProduction = process.env.NODE_ENV === 'production';
+
+function parseTrustProxy(val) {
+  if (val === undefined || val === null || val === '' || val === 'false') {
+    return false; // Default: no trusted proxy for local/direct exposure
+  }
+  if (val === 'true') {
+    return true;
+  }
+  if (/^\d+$/.test(val)) {
+    return Number(val);
+  }
+  return val;
+}
 
 export function getConfig(overrides = {}) {
   const prodFlag = overrides.isProduction ?? isProduction;
@@ -16,12 +28,24 @@ export function getConfig(overrides = {}) {
     throw new Error('SESSION_SECRET must contain at least 32 characters in production.');
   }
 
+  const mongodbUri = overrides.mongodbUri ?? process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017';
+  const mongodbDbName = overrides.mongodbDbName ?? process.env.MONGODB_DB_NAME ?? 'art_studio';
+  const trustProxy = overrides.trustProxy !== undefined ? overrides.trustProxy : parseTrustProxy(process.env.TRUST_PROXY);
+
   return {
-    port: Number(process.env.PORT || 3000),
-    databasePath: path.resolve(process.env.DATABASE_PATH || './data/art-studio.sqlite'),
-    appOrigin: process.env.APP_ORIGIN || 'http://localhost:5173',
+    port: Number(overrides.port ?? process.env.PORT ?? 3000),
+    mongodbUri,
+    mongodbDbName,
+    trustProxy,
+    appOrigin: overrides.appOrigin ?? process.env.APP_ORIGIN ?? 'http://localhost:5173',
+    serverOrigin: overrides.serverOrigin ?? process.env.SERVER_ORIGIN ?? 'http://localhost:3000',
+    googleClientId: overrides.googleClientId ?? process.env.GOOGLE_CLIENT_ID ?? '',
+    googleClientSecret: overrides.googleClientSecret ?? process.env.GOOGLE_CLIENT_SECRET ?? '',
+    googleCallbackUrl: overrides.googleCallbackUrl ?? process.env.GOOGLE_CALLBACK_URL ?? 'http://localhost:3000/api/auth/google/callback',
+    studioEmail: (overrides.studioEmail ?? process.env.STUDIO_EMAIL ?? 'studio@artstudio.com').trim().toLowerCase(),
+    studioPassword: overrides.studioPassword ?? process.env.STUDIO_PASSWORD ?? 'StudioPass123!long',
+    isProduction: prodFlag,
     ...overrides,
     sessionSecret,
-    isProduction: prodFlag,
   };
 }

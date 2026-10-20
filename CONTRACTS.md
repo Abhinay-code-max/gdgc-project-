@@ -1,15 +1,14 @@
 # Frozen implementation contracts
 
-This file is the integration contract agreed before feature coding on 2026-10-19.
+This file is the integration contract agreed for the Art Studio application.
 
 ## Stack
 
-- Node.js 20+, Express 5, React 19, Vite 7.
-- SQLite through `better-sqlite3`, with WAL mode, foreign keys, explicit transactions,
-  and partial unique indexes. The repository-local database is persistent and requires
-  no external service for the prototype.
-- `express-session` with a SQLite-backed session store, HTTP-only same-site cookies,
-  `bcryptjs` password hashes, JSON body limits, and an Origin check on mutations.
+- Node.js 20+, Express 5, React 19, React Router 7, Vite 7.
+- MongoDB with Mongoose 9. Database is accessed via `MONGODB_URI` (MongoDB Atlas or replica set in dev/production). Tests use an isolated in-memory replica set (`MongoMemoryReplSet`) supporting multi-document transactions. Standalone topologies without transaction support are rejected.
+- `express-session` with MongoDB-backed session store (`connect-mongo`), HTTP-only same-site (lax for OAuth redirect compatibility) cookies, `bcryptjs` password hashes, JSON body limits, and an Origin check on mutations.
+- Passport.js with Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` enforcement.
+- `express-rate-limit` for tiered endpoint protection with configurable `trustProxy`.
 - Vitest/Supertest for server integration and concurrency checks.
 
 ## Response and error format
@@ -21,76 +20,68 @@ Delete-style mutations still return the updated resource. Errors are:
 { "error": { "code": "STABLE_CODE", "message": "Human-readable message", "fields": {} } }
 ```
 
-`fields` is optional. Status rules: malformed JSON/request `400`, unauthenticated
-`401`, wrong role `403`, missing or another customer's resource `404`, uniqueness or
-state conflict `409`, field/business validation `422`.
+`fields` is optional. Status rules:
+- Malformed JSON / request `400`
+- Unauthenticated `401`
+- Forbidden / wrong role / bad origin `403`
+- Missing or another customer's resource `404`
+- Uniqueness or state conflict `409`
+- Field / business validation `422`
+- Rate limit exceeded `429`
+- Server error `500`
 
 Dates are `YYYY-MM-DD`; timestamps are UTC ISO strings. Money is integer INR paise and
-is exposed as `priceMinor`/`rateMinor`. IDs are integer JSON numbers.
+is exposed as `priceMinor`. IDs are string representations of MongoDB ObjectIds.
 
 ## Authentication routes
 
-- `POST /api/auth/register` body `{ email, password }` -> `201 {data:{user}}`.
-  Always creates role `customer`. Duplicate email: `409 EMAIL_TAKEN`.
-- `POST /api/auth/login` body `{ email, password }` -> `200 {data:{user}}`.
-  Bad credentials: `401 INVALID_CREDENTIALS`.
-- `POST /api/auth/logout` -> `200 {data:{loggedOut:true}}`.
-- `GET /api/auth/me` -> `200 {data:{user}}`; no session: `401 AUTH_REQUIRED`.
+- `POST /api/auth/register` body `{ email, password }` -> `201 { data: { user } }`.
+  Always assigns role `customer` (Buyer). Duplicate email: `409 EMAIL_TAKEN`. Protected by `authLimiter`.
+- `POST /api/auth/login` body `{ email, password }` -> `200 { data: { user } }`.
+  Bad credentials: `401 INVALID_CREDENTIALS`. Protected by `authLimiter`.
+- `POST /api/auth/logout` -> `200 { data: { loggedOut: true } }`.
+- `GET /api/auth/me` -> `200 { data: { user } }`; no session: `401 AUTH_REQUIRED`.
+- `GET /api/auth/config` -> `200 { data: { googleAuthAvailable: boolean } }`.
+- `GET /api/auth/google` -> Starts Google OAuth 2.0 flow; generates cryptographically secure 32-byte session-bound `state` nonce; redirects to Google consent or `/login?error=oauth_not_configured` if credentials missing. Protected by `oauthLimiter`.
+- `GET /api/auth/google/callback?state=...&code=...` -> Google OAuth callback. Validates incoming `state` against session-bound nonce (rejects mismatch/missing with redirect `/login?error=oauth_csrf_rejected`). Requires authoritative verified email claim (`email_verified === true`). Successful authentication establishes session and redirects to `/seller` (studio) or `/buyer` (customer). Failed, unverified, or cancelled redirects to `/login?error=...`. Protected by `oauthLimiter`.
 
-User shape: `{ id, email, role, createdAt }`; roles are `customer | studio`.
+User shape: `{ id, email, role, displayName, avatarUrl, createdAt }`.
+Internal roles are `customer` and `studio`, displayed in UI as **Buyer** and **Seller**.
 
 ## Painting and order routes
 
-- `GET /api/paintings` is public -> painting summaries.
-- `GET /api/paintings/:id` is public -> one painting.
-- `POST /api/paintings` studio only; body
-  `{ title, description, priceMinor, imageUrl? }` -> `201`.
-- `PATCH /api/paintings/:id` studio only; same fields, partial -> `200`.
-  A painting with a placed order returns `409 PAINTING_SOLD`.
-- `POST /api/paintings/:id/purchase` customer only, no body -> `201 {data:{order}}`.
-  Contention/sold returns `409 PAINTING_UNAVAILABLE`.
-- `GET /api/orders` authenticated. Customer gets own orders; studio gets all.
-- `GET /api/orders/:id` authenticated. Another customer's order is `404 ORDER_NOT_FOUND`.
-- `POST /api/orders/:id/cancel` customer owner only -> updated order.
-  Non-placed order returns `409 ORDER_NOT_CANCELLABLE`.
+- `GET /api/paintings` is public -> painting summaries with derived `available` boolean.
+- `GET /api/paintings/:id` is public -> one painting with derived `available` boolean. Invalid ID or missing: `404 PAINTING_NOT_FOUND`.
+- `POST /api/paintings` studio only; body `{ title, description, priceMinor, imageUrl? }` -> `201 { data: { painting } }`.
+- `PATCH /api/paintings/:id` studio only; partial body -> `200 { data: { painting } }`.
+  A painting with an active `placed` order returns `409 PAINTING_SOLD`.
+- `POST /api/paintings/:id/purchase` customer only, no body -> `201 { data: { order } }`.
+  Contention or already sold returns `409 PAINTING_UNAVAILABLE`.
+- `GET /api/orders` authenticated. Customer receives own orders; studio receives all orders with `customerEmail`.
+- `GET /api/orders/:id` authenticated. Another customer's order is hidden behind `404 ORDER_NOT_FOUND`. Studio receives any order with `customerEmail`.
+- `POST /api/orders/:id/cancel` customer owner only -> `200 { data: { order } }`.
+  Non-placed or already cancelled order returns `409 ORDER_NOT_CANCELLABLE`.
 
-Painting shape: `{ id, title, description, priceMinor, imageUrl, available, createdAt,
-updatedAt }`. Order shape: `{ id, customerId, customerEmail?, paintingId, paintingTitle,
-priceMinor, status, createdAt, updatedAt, cancelledAt }`. Order statuses:
-`placed | cancelled`. Customer ownership is always taken from `req.session.user`.
+Painting shape: `{ id, title, description, priceMinor, imageUrl, available, createdAt, updatedAt }`.
+Order shape: `{ id, customerId, paintingId, paintingTitle, priceMinor, status, createdAt, updatedAt, cancelledAt, customerEmail? }`.
+`customerId` is always a 24-character hex ObjectId string, regardless of population.
+Order statuses: `placed | cancelled`. Customer ownership is strictly derived from server session.
 
-Purchase transaction: begin an immediate write transaction, load painting, check no
-placed order, insert order with the current painting price, commit. A partial unique
-index on orders `(painting_id) WHERE status = 'placed'` is the final guard.
-Cancellation updates only the owned order from `placed` to `cancelled` in a transaction.
-Availability is derived from the absence of a placed order. Editing uses the same
-write lock and rejects a sold painting.
+## Concurrency and database indexes
 
-## Wall-booking proposed contract (not enabled before core checkpoint)
+- Orders collection enforces single active placed order:
+  `{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`
+- Users collection enforces unique email and sparse unique Google ID:
+  `{ email: 1 }, { unique: true }`
+  `{ googleId: 1 }, { unique: true, partialFilterExpression: { googleId: { $type: 'string' } } }`
+- Multi-document transactions guarantee that purchasing checks painting availability and creates exactly one placed order atomically.
 
-- `POST /api/wall-bookings` customer body `{ serviceDate, wallSizeSqFt, address }`.
-- `GET /api/wall-bookings` authenticated and role-scoped.
-- `GET /api/wall-bookings/:id` authenticated and ownership-hidden for customers.
-- `POST /api/wall-bookings/:id/confirm` studio only.
-- `POST /api/wall-bookings/:id/decline` studio only.
-- `POST /api/wall-bookings/:id/cancel` owning customer only.
+## Frontend client routes
 
-Statuses: `requested | confirmed | declined | cancelled`. Asia/Kolkata calendar date
-boundaries are inclusive: requests allow today + 7 through today + 90; size 10 through
-500; cancellation is allowed while requested/confirmed when service date is at least
-today + 3. Requested/confirmed dates are protected by a partial unique index.
-The server snapshots the official seed rate and calculates `priceMinor = size * rate`.
-No endpoint will be enabled until an official rate is available.
-
-## File ownership
-
-- Agent 1: root shared config, `server/db/**`, `server/migrations/**`,
-  `server/middleware/**`, `server/routes/auth.js`, `server/app.js`, shared contracts,
-  and authentication/foundation tests.
-- Agent 2: `server/routes/paintings.js`, `server/routes/orders.js`, and painting/order
-  integration tests. Schema/auth changes must be requested from Agent 1.
-- Agent 3: `docs/WALL_BOOKING_CONTRACT.md` until the core checkpoint. If enabled,
-  `server/routes/wallBookings.js` and wall-booking tests; migration changes remain Agent 1.
-- Agent 4: `client/**`, `README.md`, final `DESIGN.md`, and end-to-end integration notes.
-  Agent 4 does not edit server feature or schema files.
-
+- `/` — Public home page with studio overview, featured paintings, and service transparency.
+- `/login` — Dedicated login page with email form and Google button.
+- `/register` — Dedicated Buyer registration page.
+- `/gallery` — Public paintings gallery with real-time availability badges.
+- `/buyer` — Protected Buyer dashboard (order history, cancellation).
+- `/seller` — Protected Seller dashboard (catalogue management, all orders).
+- `*` — Branded 404 page with return navigation.

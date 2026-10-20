@@ -50,3 +50,6 @@ export const formatMoney = (minor) =>
 
 export const formatDateTime = (value) =>
   new Intl.DateTimeFormat('en-IN', { dateStyle: 'medium', timeStyle: 'short' }).format(new Date(value));
+
+
+export const displayRole = (role) => (role === 'studio' ? 'Seller' : 'Buyer');

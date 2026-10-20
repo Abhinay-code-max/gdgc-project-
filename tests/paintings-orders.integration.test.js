@@ -1,21 +1,40 @@
 import bcrypt from 'bcryptjs';
 import request from 'supertest';
-import { afterEach, describe, expect, it } from 'vitest';
+import session from 'express-session';
+import { beforeAll, afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../server/app.js';
+import { User } from '../server/models/User.js';
+import { Painting } from '../server/models/Painting.js';
+import { Order } from '../server/models/Order.js';
+import { setupTestReplSet, teardownTestReplSet, clearCollections } from './setup-mongo.js';
 
 const origin = 'http://localhost:5173';
 const password = 'correct horse battery staple';
-const apps = [];
+let testUri = '';
+
+beforeAll(async () => {
+  const setup = await setupTestReplSet();
+  testUri = setup.uri;
+});
+
+afterAll(async () => {
+  await teardownTestReplSet();
+});
+
+beforeEach(async () => {
+  await clearCollections();
+});
 
 function freshApp() {
-  const app = createApp({
-    databasePath: ':memory:',
+  const sessionStore = new session.MemoryStore();
+  return createApp({
+    mongodbUri: testUri,
+    mongodbDbName: 'art_studio_test',
     sessionSecret: 'painting-order-tests-have-a-long-secret',
     appOrigin: origin,
     isProduction: false,
+    sessionStore,
   });
-  apps.push(app);
-  return app;
 }
 
 async function registerCustomer(app, email) {
@@ -27,8 +46,11 @@ async function registerCustomer(app, email) {
 
 async function studioAgent(app) {
   const passwordHash = await bcrypt.hash(password, 4);
-  app.locals.db.prepare("INSERT INTO users (email, password_hash, role) VALUES (?, ?, 'studio')")
-    .run('studio@example.com', passwordHash);
+  await User.findOneAndUpdate(
+    { email: 'studio@example.com' },
+    { $set: { passwordHash, role: 'studio', displayName: 'Studio Master' } },
+    { upsert: true }
+  );
   const agent = request.agent(app);
   const response = await agent.post('/api/auth/login').set('Origin', origin)
     .send({ email: 'studio@example.com', password });
@@ -48,8 +70,18 @@ async function createPainting(agent, overrides = {}) {
   return response.body.data;
 }
 
-afterEach(() => {
-  while (apps.length) apps.pop().locals.db.close();
+describe('database indexes verification', () => {
+  it('ensures required indexes exist on MongoDB collections including partial unique index', async () => {
+    const orderIndexes = await Order.collection.indexes();
+    const placedIndex = orderIndexes.find((idx) => idx.key.paintingId === 1 && idx.unique === true);
+    expect(placedIndex).toBeDefined();
+    expect(placedIndex.partialFilterExpression).toEqual({ status: 'placed' });
+
+    const userIndexes = await User.collection.indexes();
+    const googleIndex = userIndexes.find((idx) => idx.key.googleId === 1 && idx.unique === true);
+    expect(googleIndex).toBeDefined();
+    expect(googleIndex.partialFilterExpression).toEqual({ googleId: { $type: 'string' } });
+  });
 });
 
 describe('painting management and public browsing', () => {
@@ -98,11 +130,13 @@ describe('purchase, cancellation, and order authorization', () => {
     ]);
     expect(responses.map(({ status }) => status).sort()).toEqual([201, 409]);
     expect(responses.find(({ status }) => status === 409).body.error.code).toBe('PAINTING_UNAVAILABLE');
-    expect(app.locals.db.prepare("SELECT count(*) AS count FROM orders WHERE painting_id = ? AND status = 'placed'")
-      .get(painting.id).count).toBe(1);
+
+    const placedCount = await Order.countDocuments({ paintingId: painting.id, status: 'placed' });
+    expect(placedCount).toBe(1);
 
     const sold = await request(app).get(`/api/paintings/${painting.id}`);
     expect(sold.body.data.available).toBe(false);
+
     const edit = await studio.patch(`/api/paintings/${painting.id}`).set('Origin', origin).send({ priceMinor: 999999 });
     expect(edit.status).toBe(409);
     expect(edit.body.error.code).toBe('PAINTING_SOLD');
@@ -119,33 +153,58 @@ describe('purchase, cancellation, and order authorization', () => {
     expect(bought.status).toBe(201);
     expect(bought.body.data).toMatchObject({ priceMinor: 234500, status: 'placed' });
     expect(bought.body.data).not.toHaveProperty('customerEmail');
+    expect(bought.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
     const orderId = bought.body.data.id;
+    const buyerId = bought.body.data.customerId;
 
+    // Ownership hiding: 404 instead of 403
     expect((await other.get(`/api/orders/${orderId}`)).status).toBe(404);
     expect((await other.post(`/api/orders/${orderId}/cancel`).set('Origin', origin)).status).toBe(404);
     expect((await studio.post(`/api/orders/${orderId}/cancel`).set('Origin', origin)).status).toBe(403);
+
     const ownerOrders = await owner.get('/api/orders');
     expect(ownerOrders.body.data).toHaveLength(1);
+    expect(ownerOrders.body.data[0].customerId).toBe(buyerId);
     expect((await other.get('/api/orders')).body.data).toEqual([]);
 
+    // Seller order detail covers both customerId string and customerEmail
     const studioDetail = await studio.get(`/api/orders/${orderId}`);
     expect(studioDetail.status).toBe(200);
+    expect(studioDetail.body.data.customerId).toBe(buyerId);
+    expect(studioDetail.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
     expect(studioDetail.body.data.customerEmail).toBe('owner@example.com');
+
+    // Seller order list covers both customerId string and customerEmail
+    const studioOrders = await studio.get('/api/orders');
+    expect(studioOrders.status).toBe(200);
+    expect(studioOrders.body.data).toHaveLength(1);
+    expect(studioOrders.body.data[0].customerId).toBe(buyerId);
+    expect(studioOrders.body.data[0].customerId).toMatch(/^[0-9a-fA-F]{24}$/);
+    expect(studioOrders.body.data[0].customerEmail).toBe('owner@example.com');
 
     const cancelled = await owner.post(`/api/orders/${orderId}/cancel`).set('Origin', origin);
     expect(cancelled.status).toBe(200);
     expect(cancelled.body.data.status).toBe('cancelled');
     expect(cancelled.body.data.cancelledAt).toEqual(expect.any(String));
+
     const secondCancellation = await owner.post(`/api/orders/${orderId}/cancel`).set('Origin', origin);
     expect(secondCancellation.status).toBe(409);
     expect(secondCancellation.body.error.code).toBe('ORDER_NOT_CANCELLABLE');
 
+    // Released painting can be edited and repurchased
     const edited = await studio.patch(`/api/paintings/${painting.id}`).set('Origin', origin).send({ priceMinor: 300000 });
     expect(edited.status).toBe(200);
+
     const repurchased = await other.post(`/api/paintings/${painting.id}/purchase`).set('Origin', origin);
     expect(repurchased.status).toBe(201);
     expect(repurchased.body.data.priceMinor).toBe(300000);
+    expect(repurchased.body.data.customerId).toMatch(/^[0-9a-fA-F]{24}$/);
+    expect(repurchased.body.data.customerId).not.toBe(buyerId);
+
+    // Initial order snapshot remains unchanged
     expect((await owner.get(`/api/orders/${orderId}`)).body.data.priceMinor).toBe(234500);
-    expect(app.locals.db.prepare('SELECT count(*) AS count FROM orders WHERE painting_id = ?').get(painting.id).count).toBe(2);
+
+    const totalOrders = await Order.countDocuments({ paintingId: painting.id });
+    expect(totalOrders).toBe(2);
   });
 });

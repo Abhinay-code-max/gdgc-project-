@@ -1,15 +1,100 @@
 import { Router } from 'express';
+import mongoose from 'mongoose';
 import { requireAuth, requireRole } from '../middleware/auth.js';
+import { Order } from '../models/Order.js';
+import { orderJson } from './paintings.js';
+import { runInTransaction } from '../db/connection.js';
 
-const sql=`SELECT o.*,u.email customer_email,p.title painting_title FROM orders o JOIN users u ON u.id=o.customer_id JOIN paintings p ON p.id=o.painting_id`;
-const oid=value=>/^\d+$/.test(value)&&+value>0?+value:null;
-const json=(r,studio=false)=>{const out={id:r.id,customerId:r.customer_id,paintingId:r.painting_id,paintingTitle:r.painting_title,priceMinor:r.price_minor,status:r.status,createdAt:r.created_at,updatedAt:r.updated_at,cancelledAt:r.cancelled_at};if(studio)out.customerEmail=r.customer_email;return out;};
-const missing=res=>res.status(404).json({error:{code:'ORDER_NOT_FOUND',message:'Order not found.'}});
+const isValidObjectId = (val) => mongoose.Types.ObjectId.isValid(val) && String(new mongoose.Types.ObjectId(val)) === String(val);
 
-export function createOrdersRouter(db) {
-  const router=Router();
-  router.get('/',requireAuth,(req,res)=>{const studio=req.session.user.role==='studio';const rows=studio?db.prepare(`${sql} ORDER BY o.created_at DESC,o.id DESC`).all():db.prepare(`${sql} WHERE o.customer_id=? ORDER BY o.created_at DESC,o.id DESC`).all(req.session.user.id);return res.json({data:rows.map(r=>json(r,studio))});});
-  router.get('/:id',requireAuth,(req,res)=>{const id=oid(req.params.id);if(!id)return missing(res);const studio=req.session.user.role==='studio';const row=studio?db.prepare(`${sql} WHERE o.id=?`).get(id):db.prepare(`${sql} WHERE o.id=? AND o.customer_id=?`).get(id,req.session.user.id);return row?res.json({data:json(row,studio)}):missing(res);});
-  router.post('/:id/cancel',...requireRole('customer'),(req,res)=>{const id=oid(req.params.id);if(!id)return missing(res);const result=db.transaction(()=>{const row=db.prepare(`${sql} WHERE o.id=? AND o.customer_id=?`).get(id,req.session.user.id);if(!row)return 'missing';if(row.status!=='placed')return 'not-cancellable';const changed=db.prepare("UPDATE orders SET status='cancelled',cancelled_at=strftime('%Y-%m-%dT%H:%M:%fZ','now'),updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND customer_id=? AND status='placed'").run(id,req.session.user.id);if(changed.changes!==1)return 'not-cancellable';return db.prepare(`${sql} WHERE o.id=?`).get(id);}).immediate();if(result==='missing')return missing(res);if(result==='not-cancellable')return res.status(409).json({error:{code:'ORDER_NOT_CANCELLABLE',message:'This order cannot be cancelled.'}});return res.json({data:json(result)});});
+const missing = (res) => res.status(404).json({ error: { code: 'ORDER_NOT_FOUND', message: 'Order not found.' } });
+
+export function createOrdersRouter() {
+  const router = Router();
+
+  // GET /api/orders - Authenticated: customer sees own orders; studio sees all with customerEmail
+  router.get('/', requireAuth, async (req, res, next) => {
+    try {
+      const isStudio = req.session.user.role === 'studio';
+      const filter = isStudio ? {} : { customerId: req.session.user.id };
+
+      let query = Order.find(filter).sort({ createdAt: -1, _id: -1 });
+      if (isStudio) {
+        query = query.populate('customerId', 'email');
+      }
+
+      const rows = await query.exec();
+      return res.json({
+        data: rows.map((r) => {
+          const email = isStudio && r.customerId?.email ? r.customerId.email : null;
+          return orderJson(r, isStudio, email);
+        }),
+      });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  // GET /api/orders/:id - Authenticated: studio sees any; customer sees only own; other customer receives 404
+  router.get('/:id', requireAuth, async (req, res, next) => {
+    try {
+      if (!isValidObjectId(req.params.id)) return missing(res);
+      const isStudio = req.session.user.role === 'studio';
+
+      let query = Order.findById(req.params.id);
+      if (isStudio) {
+        query = query.populate('customerId', 'email');
+      }
+
+      const row = await query.exec();
+      if (!row) return missing(res);
+
+      if (!isStudio && row.customerId.toString() !== req.session.user.id) {
+        return missing(res); // Ownership hiding
+      }
+
+      const email = isStudio && row.customerId?.email ? row.customerId.email : null;
+      return res.json({ data: orderJson(row, isStudio, email) });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+  // POST /api/orders/:id/cancel - Customer owner only
+  router.post('/:id/cancel', ...requireRole('customer'), async (req, res, next) => {
+    try {
+      if (!isValidObjectId(req.params.id)) return missing(res);
+
+      const result = await runInTransaction(async (session) => {
+        const query = session ? Order.findById(req.params.id).session(session) : Order.findById(req.params.id);
+        const order = await query;
+        if (!order || order.customerId.toString() !== req.session.user.id) {
+          return { status: 'missing' };
+        }
+        if (order.status !== 'placed') {
+          return { status: 'not-cancellable' };
+        }
+
+        order.status = 'cancelled';
+        order.cancelledAt = new Date();
+        if (session) await order.save({ session });
+        else await order.save();
+
+        return { status: 'ok', data: orderJson(order) };
+      });
+
+      if (result.status === 'missing') return missing(res);
+      if (result.status === 'not-cancellable') {
+        return res.status(409).json({
+          error: { code: 'ORDER_NOT_CANCELLABLE', message: 'This order cannot be cancelled.' },
+        });
+      }
+
+      return res.json({ data: result.data });
+    } catch (err) {
+      return next(err);
+    }
+  });
+
   return router;
 }
