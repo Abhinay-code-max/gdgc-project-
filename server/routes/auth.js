@@ -33,33 +33,52 @@ export const establishSession = (req, user) =>
 
 export async function verifyGoogleProfile(accessToken, refreshToken, profile, done) {
   try {
-    // 1. Authoritative normalized email extraction
-    const rawEmail = typeof profile?._json?.email === 'string'
-      ? profile._json.email
-      : (profile?.emails?.[0]?.value ? profile.emails[0].value : null);
+    let verifiedEmail = null;
 
-    const email = typeof rawEmail === 'string' ? rawEmail.trim().toLowerCase() : null;
-
-    // Check for malformed or missing email
-    if (!email || !emailPattern.test(email)) {
-      return done(null, false, { message: 'invalid_email' });
+    // Rule 1: profile._json.email is accepted ONLY when profile._json.email_verified === true
+    if (
+      profile?._json &&
+      profile._json.email_verified === true &&
+      typeof profile._json.email === 'string'
+    ) {
+      const candidate = profile._json.email.trim().toLowerCase();
+      if (emailPattern.test(candidate)) {
+        verifiedEmail = candidate;
+      }
     }
 
-    // 2. Strict authoritative verification from Google claim
-    const jsonVerified = profile._json?.email_verified === true;
-    const arrayVerified = Boolean(
-      profile.emails?.some(
-        (e) => (e.verified === true || e.verified === 'true') &&
-          typeof e.value === 'string' &&
-          e.value.trim().toLowerCase() === email
-      )
-    );
+    // Rule 2: An emails[] entry is accepted ONLY when that same entry has verified === true
+    if (!verifiedEmail && Array.isArray(profile?.emails)) {
+      for (const entry of profile.emails) {
+        if (
+          (entry?.verified === true || entry?.verified === 'true') &&
+          typeof entry?.value === 'string'
+        ) {
+          const candidate = entry.value.trim().toLowerCase();
+          if (emailPattern.test(candidate)) {
+            verifiedEmail = candidate;
+            break;
+          }
+        }
+      }
+    }
 
-    if (!jsonVerified && !arrayVerified) {
+    // If no verified email was extracted through paired authoritative claims:
+    if (!verifiedEmail) {
+      const rawCandidate = typeof profile?._json?.email === 'string'
+        ? profile._json.email
+        : (profile?.emails?.[0]?.value || null);
+
+      if (rawCandidate && !emailPattern.test(rawCandidate.trim())) {
+        return done(null, false, { message: 'invalid_email' });
+      }
+      if (!rawCandidate) {
+        return done(null, false, { message: 'invalid_email' });
+      }
       return done(null, false, { message: 'unverified_email' });
     }
 
-    // 3. Check if user already exists with this googleId
+    // Check if user already exists with this googleId
     let user = await User.findOne({ googleId: profile.id });
     if (user) {
       let updated = false;
@@ -75,8 +94,8 @@ export async function verifyGoogleProfile(accessToken, refreshToken, profile, do
       return done(null, user);
     }
 
-    // 4. Safe account linking: if verified email matches existing account, link safely WITHOUT changing role
-    user = await User.findOne({ email });
+    // Safe account linking: if verified email matches existing account, link safely WITHOUT modifying role
+    user = await User.findOne({ email: verifiedEmail });
     if (user) {
       user.googleId = profile.id;
       if (!user.displayName && profile.displayName) {
@@ -90,9 +109,9 @@ export async function verifyGoogleProfile(accessToken, refreshToken, profile, do
       return done(null, user);
     }
 
-    // 5. New user from Google: always customer role (no tokens stored)
+    // New user from Google: always customer role (no access/refresh tokens stored)
     user = await User.create({
-      email,
+      email: verifiedEmail,
       googleId: profile.id,
       displayName: profile.displayName ? profile.displayName.trim() : null,
       avatarUrl: profile.photos?.[0]?.value || null,
@@ -113,7 +132,9 @@ export function createAuthRouter({ config, rateLimiters = {}, passportInstance =
   const hasGoogleConfig = Boolean(config?.googleClientId && config?.googleClientSecret);
 
   if (hasGoogleConfig) {
-    try {
+    // Only register strategy if not already registered on this passport instance
+    const isAlreadyRegistered = passportInstance._strategy ? Boolean(passportInstance._strategy('google')) : false;
+    if (!isAlreadyRegistered) {
       passportInstance.use(
         new GoogleStrategy(
           {
@@ -124,8 +145,6 @@ export function createAuthRouter({ config, rateLimiters = {}, passportInstance =
           verifyGoogleProfile
         )
       );
-    } catch {
-      // Ignore if strategy is already registered
     }
   }
 
@@ -264,7 +283,7 @@ export function createAuthRouter({ config, rateLimiters = {}, passportInstance =
       return res.redirect(`${config.appOrigin}/login?error=oauth_csrf_rejected`);
     }
 
-    // Single-use state nonce consumption
+    // Single-use state nonce consumption: immediately delete so consumed state cannot be reused
     delete req.session.oauthState;
 
     passportInstance.authenticate('google', { session: false }, async (err, user, info) => {

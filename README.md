@@ -74,8 +74,8 @@ MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
 MONGODB_DB_NAME=art_studio
 ```
 
-### 3. Test Environment (Zero-Config In-Memory Replica Set)
-Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). You can optionally specify a custom binary via `MONGOMS_SYSTEM_BINARY=<path-to-mongod>`. If omitted, tests portably execute without requiring external cluster setup or Atlas network dependencies.
+### 3. Test Environment (Zero-Config Portable Replica Set)
+Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). You can optionally specify a custom binary via `MONGOMS_SYSTEM_BINARY=<path-to-mongod>` and/or `MONGOMS_VERSION=<version>`. If omitted, tests portably execute using `mongodb-memory-server`'s default managed binary without requiring external cluster setup or Atlas network dependencies. Both default and explicit system binary modes run with zero version-conflict warnings.
 
 ---
 
@@ -92,23 +92,23 @@ Automated tests automatically launch an isolated in-memory replica set (`mongodb
    - *(Note: When deploying to production later, add the production callback URL, e.g. `https://your-domain.com/api/auth/google/callback`)*
 6. Copy the generated Client ID and Client Secret into `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
 
-> **Implementation & Verification Status:** The Google OAuth implementation is automated-test verified using mocked Google profiles (covering verified email claims, unverified email rejection, malformed email rejection, CSRF state enforcement, and safe account linking). Live end-to-end authentication with Google remains pending until a developer provides active Google Cloud credentials and tests against Google's live authorization endpoints.
+> **Implementation & Verification Status:** The Google OAuth implementation is automated-test verified using mocked Google profiles (covering strict claim pairing of verified emails, unverified/mismatched email rejection, malformed email rejection, single-use session-bound CSRF state enforcement, provider failure resilience, and safe account linking). Live end-to-end authentication with Google remains pending until a developer provides active Google Cloud credentials and tests against Google's live authorization endpoints.
 > If Google credentials are omitted, the application remains fully functional with email/password authentication and displays a helpful notice.
 
 ---
 
 ## Clean-Install and Verification Process
 
-Dependencies are consolidated at the project root so a fresh checkout can be cleanly installed and verified using standard npm commands without divergent or stale subfolder installations:
+Dependencies are consolidated at the project root with a single authoritative `package.json` and lockfile so a fresh checkout can be cleanly installed and verified using standard npm commands without divergent or stale subfolder installations:
 
 ```powershell
 # 1. Clean installation of all dependencies (root, server, client, linter, tests)
 npm ci
 
-# 2. Run automated test suite (22 unit, integration, and concurrency tests across 4 suites)
+# 2. Run automated test suite (30 unit, integration, and concurrency tests across 4 suites)
 npm test
 
-# 3. Build production client bundle
+# 3. Build production client bundle (0 warnings)
 npm run build
 
 # 4. Lint frontend code (0 warnings, 0 errors)

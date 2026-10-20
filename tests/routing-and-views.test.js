@@ -3,30 +3,32 @@ import request from 'supertest';
 import session from 'express-session';
 import path from 'node:path';
 import fs from 'node:fs';
+import os from 'node:os';
 import { createApp } from '../server/app.js';
 import { setupTestReplSet, teardownTestReplSet } from './setup-mongo.js';
 
 let testUri = '';
+let tempDistDir = '';
 
 beforeAll(async () => {
   const setup = await setupTestReplSet();
   testUri = setup.uri;
 
-  // Controlled SPA fixture ensuring the test is deterministic and independent of build execution order
-  const distDir = path.resolve('dist');
-  const distIndex = path.join(distDir, 'index.html');
-  if (!fs.existsSync(distIndex)) {
-    fs.mkdirSync(distDir, { recursive: true });
-    fs.writeFileSync(
-      distIndex,
-      '<!doctype html><html><head><title>Atelier Art Studio</title></head><body><div id="root">Atelier SPA Root</div></body></html>',
-      'utf8'
-    );
-  }
+  // Controlled SPA fixture in a temporary directory, avoiding repo dist/ pollution
+  tempDistDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artstudio-spa-fixture-'));
+  const distIndex = path.join(tempDistDir, 'index.html');
+  fs.writeFileSync(
+    distIndex,
+    '<!doctype html><html><head><title>Atelier Art Studio</title></head><body><div id="root">Atelier SPA Root</div></body></html>',
+    'utf8'
+  );
 });
 
 afterAll(async () => {
   await teardownTestReplSet();
+  if (tempDistDir && fs.existsSync(tempDistDir)) {
+    fs.rmSync(tempDistDir, { recursive: true, force: true });
+  }
 });
 
 function freshApp() {
@@ -36,6 +38,7 @@ function freshApp() {
     mongodbDbName: 'art_studio_test',
     appOrigin: 'http://localhost:5173',
     sessionStore,
+    distPath: tempDistDir,
   });
 }
 

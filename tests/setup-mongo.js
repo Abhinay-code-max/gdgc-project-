@@ -1,4 +1,4 @@
-import fs from 'node:fs';
+import childProcess from 'node:child_process';
 import { MongoMemoryReplSet } from 'mongodb-memory-server';
 import mongoose from 'mongoose';
 import { connectDatabase, closeDatabase } from '../server/db/connection.js';
@@ -9,15 +9,28 @@ import { Order } from '../server/models/Order.js';
 let replSetInstance = null;
 
 function getBinaryConfig() {
-  const customBinary = process.env.MONGOMS_SYSTEM_BINARY;
-  if (customBinary) {
-    return { systemBinary: customBinary };
+  const binary = {};
+  if (process.env.MONGOMS_SYSTEM_BINARY) {
+    binary.systemBinary = process.env.MONGOMS_SYSTEM_BINARY;
+    if (process.env.MONGOMS_VERSION) {
+      binary.version = process.env.MONGOMS_VERSION;
+    } else {
+      try {
+        const out = childProcess.spawnSync(process.env.MONGOMS_SYSTEM_BINARY, ['--version'], {
+          encoding: 'utf8',
+        }).stdout;
+        const match = out && out.match(/^\s*db\s+version\s+v?(\d+\.\d+\.\d+)/im);
+        if (match && match[1]) {
+          binary.version = match[1];
+        }
+      } catch {
+        // Fall back gracefully to default version resolution
+      }
+    }
+  } else if (process.env.MONGOMS_VERSION) {
+    binary.version = process.env.MONGOMS_VERSION;
   }
-  const winDefault = 'C:\\Program Files\\MongoDB\\Server\\8.3\\bin\\mongod.exe';
-  if (process.platform === 'win32' && fs.existsSync(winDefault)) {
-    return { systemBinary: winDefault, version: '8.3.4' };
-  }
-  return {};
+  return binary;
 }
 
 export async function setupTestReplSet() {

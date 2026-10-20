@@ -59,8 +59,8 @@ export function createApp(overrides = {}) {
   };
   app.use(session(sessionOptions));
 
-  // Initialize passport middleware after session
-  app.use(passport.initialize());
+  const passportInstance = overrides.passportInstance || passport;
+  app.use(passportInstance.initialize());
 
   // Mutation origin check
   app.use((req, res, next) => {
@@ -77,7 +77,7 @@ export function createApp(overrides = {}) {
   app.get('/api/health', (req, res) => res.json({ data: { status: 'ok' } }));
 
   // API Routers
-  app.use('/api/auth', createAuthRouter({ config, rateLimiters }));
+  app.use('/api/auth', createAuthRouter({ config, rateLimiters, passportInstance }));
   app.use('/api/paintings', createPaintingsRouter());
   app.use('/api/orders', createOrdersRouter());
 
@@ -85,7 +85,7 @@ export function createApp(overrides = {}) {
   app.use('/api', notFound);
 
   // Serve static assets in production or if dist exists
-  const distPath = path.resolve('dist');
+  const distPath = overrides.distPath || path.resolve('dist');
   app.use(express.static(distPath));
 
   // SPA fallback for unknown non-API routes so React Router can display the frontend 404 page

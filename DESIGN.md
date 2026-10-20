@@ -39,15 +39,20 @@ created by the idempotent seed command.
 
 Google OAuth security and flow:
 - `GET /api/auth/google` creates a cryptographically secure 32-byte session-bound `state` nonce and starts the flow.
-- `GET /api/auth/google/callback` strictly checks `req.query.state` against `req.session.oauthState` before continuing, mitigating login-CSRF attacks.
-- Authoritative email claims: requires Google's verified email claim (`profile._json.email_verified === true` or explicit `verified: true` in `emails`), matching the normalized email. Missing or false claims are rejected with `unverified_email`.
+- `GET /api/auth/google/callback` strictly checks `req.query.state` against `req.session.oauthState` before continuing, mitigating login-CSRF attacks. Once validated, the state nonce is consumed immediately, preventing replay attacks.
+- Authoritative email claim pairing: requires Google's verified email claim strictly paired with the respective email:
+  - `_json.email` is accepted only when `_json.email_verified === true`.
+  - An `emails[]` value is accepted only when that exact entry has `verified === true`.
+  - Cross-pairing verification claims from one source with an email from another source is strictly prohibited.
+  - Emails are normalized (trimmed and lowercased) only after successful claim pairing and validation.
+- Missing, unverified, or mismatched emails are rejected with `unverified_email`.
 - Malformed or missing emails are rejected with `invalid_email`.
 - New Google users are automatically assigned the `customer` (Buyer) role.
 - If a verified Google email matches an existing account (including studio), it is safely linked
   without altering its existing role. Google users can never inject or escalate to the studio role.
 - Missing Google credentials are handled gracefully: the application displays a helpful
   configuration message without crashing.
-- Verification status: The Google OAuth implementation is automated-test verified using mocked provider responses; live end-to-end authentication with Google remains pending until real credentials and production callback URLs are supplied.
+- Verification status: The Google OAuth implementation is automated-test verified using mocked provider responses and mocked Passport flows; live end-to-end authentication with Google remains pending until real credentials and production callback URLs are supplied.
 
 Server middleware is the authority: missing authentication returns `401`, a wrong role returns
 `403`, and a customer asking for another customer's order receives `404`. Purchase and
@@ -93,35 +98,42 @@ supplies `customerEmail` when accessed by studio sellers.
 
 Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
 
-- `npm test`: 4 test files and 22 tests passed with zero failures and zero warnings.
+- `npm test`: 4 test files and 30 tests passed with zero failures and zero warnings across both portable default binary and explicit `MONGOMS_SYSTEM_BINARY` configurations.
   1. Production session secret validation (rejects missing or <32 characters in production mode);
   2. MongoDB connection failure provides clear startup error;
   3. Standalone MongoDB topology without transaction support is explicitly rejected;
   4. Customer-only public registration, session persistence, logout, and login;
   5. Duplicate account rejection, credential checks, and mutation origin protection;
-  6. Authoritative Google email verification accepted;
-  7. Google unverified email (`verified: false`) rejected;
-  8. Missing Google verification claim rejected;
-  9. Malformed or missing Google email rejected;
-  10. Safe Google account linking to existing studio account without role modification;
-  11. Session-bound CSRF state creation upon OAuth initiation;
-  12. Missing OAuth callback state rejected;
-  13. Mismatched OAuth callback state rejected;
-  14. Rate-limit spoofing prevented under default `trustProxy: false`;
-  15. Reverse-proxy forwarding headers respected under configured `trustProxy`;
-  16. Missing OAuth configuration handled safely;
-  17. Required MongoDB indexes verified (including partial unique index on placed orders);
-  18. Public browsing and studio mutation validation;
-  19. Concurrent purchase collision test (one winner 201, one conflict 409 `PAINTING_UNAVAILABLE`);
-  20. Sold painting edit rejection (409 `PAINTING_SOLD`);
-  21. Ownership hiding (404 `ORDER_NOT_FOUND`), stable `customerId` string serialization, price snapshot immutability, and cancellation/repurchase restoration;
-  22. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
-  23. Frontend routing contract (SPA index.html served for client routes and JSON for API routes).
-- `npm run build`: Vite 7 production bundle built successfully without relying on separate client submodules.
-- `npm run lint`: oxlint passed with 0 warnings and 0 errors across all 13 client files.
+  6. Authoritatively verified `_json.email` accepted;
+  7. Authoritatively verified `emails[]` entry accepted;
+  8. Unverified array email combined with verified `_json` claim rejected (prevents cross-source spoofing);
+  9. Multiple array emails correctly selects the verified entry;
+  10. Google unverified email (`verified: false` / `email_verified: false`) rejected;
+  11. Missing Google verification claim rejected;
+  12. Malformed or missing Google email rejected;
+  13. Safe Google account linking to existing studio account without role modification;
+  14. Session-bound CSRF state creation upon OAuth initiation;
+  15. Valid matching state reaches Passport callback flow without contacting Google;
+  16. Consumed state single-use enforcement (replay rejected with `oauth_csrf_rejected`);
+  17. Missing OAuth callback state rejected;
+  18. Mismatched OAuth callback state rejected;
+  19. Safe provider error handling (error redirection to `/login?error=...`);
+  20. Rate-limit spoofing prevented under default `trustProxy: false`;
+  21. Reverse-proxy forwarding headers respected under configured `trustProxy`;
+  22. Required MongoDB indexes verified (including partial unique index on placed orders);
+  23. Public browsing and studio mutation validation;
+  24. Concurrent purchase collision test (one winner 201, one conflict 409 `PAINTING_UNAVAILABLE`);
+  25. Sold painting edit rejection (409 `PAINTING_SOLD`);
+  26. Ownership hiding (404 `ORDER_NOT_FOUND`), stable `customerId` string serialization, price snapshot immutability, and cancellation/repurchase restoration;
+  27. Complete end-to-end studio and two-buyer journey with persistence across app restarts;
+  28. Frontend routing contract (SPA index.html served for client routes and JSON for API routes);
+  29. Routing tests run with isolated temporary fixture, leaving no repo `dist/` pollution.
+- `npm run build`: Vite 7 production bundle built successfully with 0 warnings (clean single 495 kB bundle).
+- `npm run lint`: oxlint passed with 0 warnings and 0 errors across all 13 client files using the single root package configuration.
+- `npm audit` and `npm audit --omit=dev`: Found 0 vulnerabilities.
 - `npm run db:init`: Idempotent index initialization completed successfully.
 - `npm run db:seed`: Idempotent seeding completed successfully.
-- Concurrency and transaction tests run against portable in-memory replica set (`MongoMemoryReplSet`).
+- Dependency model: Single authoritative root `package.json` and lockfile with redundant `client/package.json` and `client/node_modules` eliminated. Clean checkouts install cleanly via `npm ci`.
 
 ## Five-minute demonstration
 

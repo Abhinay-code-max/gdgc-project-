@@ -157,6 +157,116 @@ describe('Secure Google OAuth Email Verification & Account Linking', () => {
     expect(resultUser.role).toBe('customer');
   });
 
+  it('accepts explicitly verified emails[] entry when _json.email is absent', async () => {
+    let resultUser = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-verified-array-1',
+        displayName: 'Verified Array User',
+        emails: [{ value: 'array.verified@example.com', verified: true }],
+      },
+      (err, user) => {
+        expect(err).toBeNull();
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeDefined();
+    expect(resultUser.email).toBe('array.verified@example.com');
+    expect(resultUser.role).toBe('customer');
+  });
+
+  it('rejects profile when _json.email_verified is true but _json.email is absent and array emails are unverified', async () => {
+    let resultUser = null;
+    let authError = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-mismatched-claims-1',
+        displayName: 'Mismatched Claim User',
+        _json: {
+          email_verified: true, // Claim exists on _json but email does not
+        },
+        emails: [{ value: 'fallback@example.com' }], // Array email lacks verified: true
+      },
+      (err, user, info) => {
+        authError = info;
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeFalsy();
+    expect(authError?.message).toBe('unverified_email');
+  });
+
+  it('rejects profile when _json.email_verified is true but no emails exist at all', async () => {
+    let resultUser = null;
+    let authError = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-no-email-1',
+        _json: { email_verified: true },
+      },
+      (err, user, info) => {
+        authError = info;
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeFalsy();
+    expect(authError?.message).toBe('invalid_email');
+  });
+
+  it('does not authorize an unverified array email using verified _json claim from a different email', async () => {
+    let resultUser = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-two-emails-1',
+        _json: {
+          email: 'primary.verified@example.com',
+          email_verified: true,
+        },
+        emails: [
+          { value: 'secondary.unverified@example.com', verified: false },
+        ],
+      },
+      (err, user) => {
+        expect(err).toBeNull();
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeDefined();
+    // Must select the verified _json email, never the unverified array email
+    expect(resultUser.email).toBe('primary.verified@example.com');
+  });
+
+  it('selects verified email from multiple array emails where only one is verified', async () => {
+    let resultUser = null;
+    await verifyGoogleProfile(
+      'token',
+      'refresh',
+      {
+        id: 'google-multi-array-1',
+        displayName: 'Multi Email User',
+        emails: [
+          { value: 'unverified-1@example.com', verified: false },
+          { value: 'verified-winner@example.com', verified: true },
+          { value: 'unverified-2@example.com' },
+        ],
+      },
+      (err, user) => {
+        expect(err).toBeNull();
+        resultUser = user;
+      }
+    );
+    expect(resultUser).toBeDefined();
+    expect(resultUser.email).toBe('verified-winner@example.com');
+  });
+
   it('rejects email when verified is explicitly false', async () => {
     let resultUser = null;
     let authError = null;
@@ -226,7 +336,7 @@ describe('Secure Google OAuth Email Verification & Account Linking', () => {
       'refresh',
       {
         id: 'google-missing-1',
-        _json: { email_verified: true },
+        _json: {},
       },
       (err, user, info) => {
         authError2 = info;
@@ -269,6 +379,24 @@ describe('Secure Google OAuth Email Verification & Account Linking', () => {
 });
 
 describe('OAuth Login-CSRF Protection & State Enforcement', () => {
+  function createMockPassport(authenticateHandler) {
+    return {
+      initialize: () => (req, res, next) => next(),
+      _strategy: () => true,
+      use: () => {},
+      authenticate: (strategy, options, callback) => {
+        return (req, res, next) => {
+          if (typeof callback === 'function') {
+            return authenticateHandler(req, res, next, callback);
+          }
+          // Initiation route (/google): simulate redirect containing state
+          const redirectUrl = `https://accounts.google.com/o/oauth2/v2/auth?state=${options.state}`;
+          return res.redirect(redirectUrl);
+        };
+      },
+    };
+  }
+
   it('creates cryptographic session-bound state upon authorization initiation', async () => {
     const app = freshApp({
       googleClientId: 'mock-client-id',
@@ -284,6 +412,88 @@ describe('OAuth Login-CSRF Protection & State Enforcement', () => {
     expect(generatedState.length).toBe(64); // 32 bytes in hex = 64 characters
   });
 
+  it('allows valid matching state to reach Passport callback flow without contacting Google', async () => {
+    const mockUser = {
+      _id: new mongoose.Types.ObjectId(),
+      email: 'oauth.buyer@example.com',
+      role: 'customer',
+      displayName: 'OAuth Buyer',
+    };
+
+    const mockPassport = createMockPassport((req, res, next, done) => {
+      done(null, mockUser);
+    });
+
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+      passportInstance: mockPassport,
+      rateLimitOptions: {
+        enableApiLimiterInTest: false,
+        authMax: 20,
+        oauthMax: 20,
+      },
+    });
+    const agent = request.agent(app);
+
+    // 1. Initiate OAuth to generate session-bound state
+    const initRes = await agent.get('/api/auth/google');
+    expect(initRes.status).toBe(302);
+    const redirectUrl = new URL(initRes.headers.location);
+    const generatedState = redirectUrl.searchParams.get('state');
+    expect(generatedState).toBeDefined();
+
+    // 2. Callback with matching state
+    const callbackRes = await agent.get(`/api/auth/google/callback?state=${generatedState}&code=mock_code`);
+    expect(callbackRes.status).toBe(302);
+    expect(callbackRes.headers.location).toBe('http://localhost:5173/buyer');
+
+    // 3. User session is active
+    const meRes = await agent.get('/api/auth/me');
+    expect(meRes.status).toBe(200);
+    expect(meRes.body.data.user.email).toBe('oauth.buyer@example.com');
+  });
+
+  it('rejects replay of consumed state (single-use enforcement)', async () => {
+    const mockUser = {
+      _id: new mongoose.Types.ObjectId(),
+      email: 'replay.tester@example.com',
+      role: 'customer',
+      displayName: 'Replay Tester',
+    };
+
+    const mockPassport = createMockPassport((req, res, next, done) => {
+      done(null, mockUser);
+    });
+
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+      passportInstance: mockPassport,
+      rateLimitOptions: {
+        enableApiLimiterInTest: false,
+        authMax: 20,
+        oauthMax: 20,
+      },
+    });
+    const agent = request.agent(app);
+
+    // 1. Initiate OAuth
+    const initRes = await agent.get('/api/auth/google');
+    const redirectUrl = new URL(initRes.headers.location);
+    const state = redirectUrl.searchParams.get('state');
+
+    // 2. First callback succeeds and consumes state
+    const firstCallback = await agent.get(`/api/auth/google/callback?state=${state}&code=mock_code_1`);
+    expect(firstCallback.status).toBe(302);
+    expect(firstCallback.headers.location).toBe('http://localhost:5173/buyer');
+
+    // 3. Replaying the identical callback with consumed state must be rejected
+    const replayCallback = await agent.get(`/api/auth/google/callback?state=${state}&code=mock_code_2`);
+    expect(replayCallback.status).toBe(302);
+    expect(replayCallback.headers.location).toBe('http://localhost:5173/login?error=oauth_csrf_rejected');
+  });
+
   it('rejects callback when state query parameter is missing', async () => {
     const app = freshApp({
       googleClientId: 'mock-client-id',
@@ -291,10 +501,7 @@ describe('OAuth Login-CSRF Protection & State Enforcement', () => {
     });
     const agent = request.agent(app);
 
-    // Initiate authorization to generate state
     await agent.get('/api/auth/google');
-
-    // Callback attempted without state
     const callbackRes = await agent.get('/api/auth/google/callback?code=mock_code');
     expect(callbackRes.status).toBe(302);
     expect(callbackRes.headers.location).toContain('error=oauth_csrf_rejected');
@@ -307,13 +514,64 @@ describe('OAuth Login-CSRF Protection & State Enforcement', () => {
     });
     const agent = request.agent(app);
 
-    // Initiate authorization to generate state
     await agent.get('/api/auth/google');
-
-    // Callback with forged/tampered state
     const callbackRes = await agent.get('/api/auth/google/callback?state=forged_state_nonce&code=mock_code');
     expect(callbackRes.status).toBe(302);
     expect(callbackRes.headers.location).toContain('error=oauth_csrf_rejected');
+  });
+
+  it('handles provider failure after valid state safely', async () => {
+    let mockFailureBehavior = null;
+    const mockPassport = createMockPassport((req, res, next, done) => {
+      mockFailureBehavior(done);
+    });
+
+    const app = freshApp({
+      googleClientId: 'mock-client-id',
+      googleClientSecret: 'mock-client-secret',
+      passportInstance: mockPassport,
+      rateLimitOptions: {
+        enableApiLimiterInTest: false,
+        authMax: 20,
+        oauthMax: 20,
+      },
+    });
+
+    // Case A: Strategy callback receives an error
+    {
+      mockFailureBehavior = (done) => done(new Error('Google 500 Server Error'));
+      const agent = request.agent(app);
+      const initRes = await agent.get('/api/auth/google');
+      const state = new URL(initRes.headers.location).searchParams.get('state');
+
+      const res = await agent.get(`/api/auth/google/callback?state=${state}&code=code_err`);
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe('http://localhost:5173/login?error=oauth_failed');
+    }
+
+    // Case B: Strategy callback receives unverified_email info
+    {
+      mockFailureBehavior = (done) => done(null, false, { message: 'unverified_email' });
+      const agent = request.agent(app);
+      const initRes = await agent.get('/api/auth/google');
+      const state = new URL(initRes.headers.location).searchParams.get('state');
+
+      const res = await agent.get(`/api/auth/google/callback?state=${state}&code=code_unverified`);
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe('http://localhost:5173/login?error=unverified_email');
+    }
+
+    // Case C: Strategy callback receives oauth denied/generic failure
+    {
+      mockFailureBehavior = (done) => done(null, false, { message: 'access_denied' });
+      const agent = request.agent(app);
+      const initRes = await agent.get('/api/auth/google');
+      const state = new URL(initRes.headers.location).searchParams.get('state');
+
+      const res = await agent.get(`/api/auth/google/callback?state=${state}&code=code_denied`);
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe('http://localhost:5173/login?error=oauth_denied');
+    }
   });
 });
 
