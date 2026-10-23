@@ -1,6 +1,85 @@
 # Atelier Art Studio
 
+[![CI](https://github.com/Abhinay-code-max/gdgc-project-/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhinay-code-max/gdgc-project-/actions/workflows/ci.yml)
+
 A full-stack art studio and gallery application for discovering and collecting one-of-a-kind original paintings. Features MongoDB persistence with Mongoose, Google OAuth alongside email/password authentication, Express rate limiting, React Router navigation, accessible animated-logo loading, and strict server-authoritative role and concurrency controls.
+
+> **Project & Deployment Status:** This repository is a **runnable local prototype** and is **not currently deployed**. It is configured and verified for local development, testing, and demonstration.
+
+---
+
+## Quick Start
+
+Follow these steps to set up and run the Atelier Art Studio prototype locally:
+
+### 1. Clone the Repository
+```bash
+git clone https://github.com/Abhinay-code-max/gdgc-project-.git
+cd gdgc-project-
+```
+
+### 2. Copy the Environment Configuration
+Copy the template configuration file to `.env`:
+```bash
+cp .env.example .env
+```
+> **Security Notice:** The `.env` file contains environment secrets and **must never be committed** to version control. It is explicitly ignored in `.gitignore`.
+
+### 3. Configure a Transaction-Capable MongoDB Database
+Multi-document transactions and partial unique indexes are enforced for atomic painting purchases and single-ownership guarantees. A transaction-capable MongoDB deployment is required:
+- **Option A (MongoDB Atlas Cluster):** Create a cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas), configure network IP access, and configure your connection string in `.env`:
+  ```env
+  MONGODB_URI=mongodb+srv://<username>:<password>@cluster0.mongodb.net/art_studio?retryWrites=true&w=majority
+  MONGODB_DB_NAME=art_studio
+  ```
+- **Option B (Local Single-Node Replica Set):** Start a local `mongod` instance configured with a replica set:
+  ```bash
+  mongod --replSet rs0 --dbpath <data-directory>
+  ```
+  Initiate the replica set once via `mongosh`:
+  ```javascript
+  rs.initiate()
+  ```
+  Then configure `MONGODB_URI` in `.env`:
+  ```env
+  MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
+  MONGODB_DB_NAME=art_studio
+  ```
+*(Note: Standalone MongoDB topologies that do not support transactions are rejected when an operation requiring `runInTransaction` is attempted).*
+
+### 4. Optional Google OAuth Configuration
+Google OAuth 2.0 is **optional**. If Google credentials are left blank in `.env`, the application automatically operates in local credential mode with email/password authentication and surfaces an informative guidance notice. To enable Google sign-in:
+- Create an OAuth 2.0 Web Client ID in the Google Cloud Console with authorized redirect URI `http://localhost:3000/api/auth/google/callback`.
+- Populate `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` in `.env`.
+
+### 5. Install Dependencies
+Install all project, server, client, linter, and testing dependencies cleanly:
+```bash
+npm ci
+```
+
+### 6. Initialize Database Indexes & Seed Initial Data
+```bash
+# Initialize indexes and collection constraints:
+npm run db:init
+
+# Seed initial studio seller account and sample gallery paintings:
+npm run db:seed
+```
+
+### 7. Start the Development Servers
+```bash
+npm run dev
+```
+This runs the Express API server and Vite client concurrently.
+
+### 8. Open the Application
+Open your browser and navigate to:
+```text
+http://localhost:5173
+```
+- Sign in as **Seller** using the `STUDIO_EMAIL` and `STUDIO_PASSWORD` credentials you configured in `.env` before running `npm run db:seed`.
+- Or register a new account to explore the **Buyer** collection experience.
 
 ---
 
@@ -9,7 +88,7 @@ A full-stack art studio and gallery application for discovering and collecting o
 - **Runtime & Backend:** Node.js 20+, Express 5, Mongoose 9, MongoDB Atlas / local replica set, `express-session` with `connect-mongo`.
 - **Authentication:** Passport.js Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` protection and verified-email claims, alongside bcrypt-hashed email/password credentials.
 - **Security & Reliability:** `helmet`, `express-rate-limit`, configurable proxy trust, SameSite HTTP-only session cookies, server-authoritative role checks, and origin verification on state-changing requests.
-- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership. Standalone topologies without transaction support are explicitly rejected.
+- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership. Standalone topologies without transaction support are explicitly rejected when an operation requiring `runInTransaction` is attempted.
 - **Frontend:** React 19, Vite 7, React Router 7 (`react-router-dom`), custom accessible animated-logo loader, responsive DM Sans / Playfair Display styling.
 
 ---
@@ -48,7 +127,7 @@ STUDIO_PASSWORD=replace-with-a-strong-studio-password-min-12-chars
 
 ## Database Setup & Replica Set Requirement
 
-MongoDB transactions require a replica set or MongoDB Atlas deployment. Standalone MongoDB topologies that do not support transactions are rejected at runtime.
+MongoDB transactions require a replica set or MongoDB Atlas deployment. Standalone MongoDB topologies that do not support transactions are rejected when an operation requiring `runInTransaction` is attempted.
 
 ### 1. MongoDB Atlas Setup (Production / Cloud Dev)
 1. Create a cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).
@@ -77,7 +156,7 @@ MONGODB_DB_NAME=art_studio
 ### 3. Test Environment (Zero-Config Portable Replica Set & System Binary)
 Automated tests automatically launch an isolated in-memory replica set (`mongodb-memory-server` with `MongoMemoryReplSet`). Two reliable test execution modes are supported:
 
-- **Default Portable Mode (`npm test`):** Executes all test suites in parallel using the portable managed binary cached by `mongodb-memory-server`. Does not require local MongoDB installations.
+- **Default Portable Mode (`npm test`):** Executes all test suites in parallel using the portable managed binary cached by `mongodb-memory-server`. Does not require local MongoDB installations, `.env`, Atlas, or external secrets.
 - **Explicit System Binary Mode (`npm run test:system-mongo`):** Executes test suites serially (`--no-file-parallelism`) against a local system `mongod` specified via `MONGOMS_SYSTEM_BINARY`. This serial mode prevents replica-set startup and port collision across test processes.
 
 Example running with explicit system binary on Windows:
@@ -116,7 +195,7 @@ Dependencies are consolidated at the project root with a single authoritative `p
 # 1. Clean installation of all dependencies (root, server, client, linter, tests)
 npm ci
 
-# 2. Run automated test suite (33 unit, integration, and concurrency tests across 5 suites)
+# 2. Run automated test suite (33 unit, integration, routing, and concurrency tests across 5 suites)
 npm test
 
 # 3. Or run against an explicit local system MongoDB binary
@@ -215,7 +294,7 @@ Client routing is managed with React Router:
 - Proper JSON 404 for API routes and SPA fallback for frontend routes.
 - Atelier animated-logo loader with reduced-motion support.
 - Idempotent `db:init` and `db:seed` commands.
-- Verified test suite: 22 tests across 4 suites passing.
+- Verified test suite: 33 unit, integration, routing, and concurrency tests across 5 suites passing.
 
 ### Deferred:
 - Real end-to-end Google OAuth live login (requires valid client credentials and developer configuration in Google Cloud).

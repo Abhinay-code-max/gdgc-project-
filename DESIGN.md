@@ -21,7 +21,7 @@ backed by MongoDB via `connect-mongo`. Data integrity and concurrency are guaran
 MongoDB multi-document transactions and a partial unique index on orders
 (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`).
 Standalone MongoDB deployments that do not support transactions are rejected with an explicit
-error.
+error when an operation requiring `runInTransaction` is attempted.
 
 Success responses use `{ "data": ... }`. Errors use a stable code and human-readable
 message under `error`, with optional field errors. Money is always an integer number
@@ -101,7 +101,7 @@ Checks executed on 2026-10-20 on branch `feature/mongodb-google-auth`:
 - `npm test`: 5 test files and 33 tests passed with zero failures and zero warnings in parallel default portable mode.
   1. Production session secret validation (rejects missing or <32 characters in production mode);
   2. MongoDB connection failure provides clear startup error;
-  3. Standalone MongoDB topology without transaction support is explicitly rejected;
+  3. Standalone MongoDB topology without transaction support is explicitly rejected when a transaction operation is attempted;
   4. Customer-only public registration, session persistence, logout, and login;
   5. Duplicate account rejection, credential checks, and mutation origin protection;
   6. Authoritatively verified `_json.email` accepted;
