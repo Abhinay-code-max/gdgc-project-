@@ -45,7 +45,7 @@ Multi-document transactions and partial unique indexes are enforced for atomic p
   MONGODB_URI=mongodb://127.0.0.1:27017/?replicaSet=rs0
   MONGODB_DB_NAME=art_studio
   ```
-*(Note: Standalone MongoDB topologies that do not support transactions are rejected at startup).*
+*(Note: Standalone MongoDB topologies that do not support transactions are rejected when an operation requiring `runInTransaction` is attempted).*
 
 ### 4. Optional Google OAuth Configuration
 Google OAuth 2.0 is **optional**. If Google credentials are left blank in `.env`, the application automatically operates in local credential mode with email/password authentication and surfaces an informative guidance notice. To enable Google sign-in:
@@ -78,7 +78,7 @@ Open your browser and navigate to:
 ```text
 http://localhost:5173
 ```
-- Sign in as **Seller** using the seeded studio account (`studio@artstudio.com` / `StudioPass123!long`).
+- Sign in as **Seller** using the `STUDIO_EMAIL` and `STUDIO_PASSWORD` credentials you configured in `.env` before running `npm run db:seed`.
 - Or register a new account to explore the **Buyer** collection experience.
 
 ---
@@ -88,7 +88,7 @@ http://localhost:5173
 - **Runtime & Backend:** Node.js 20+, Express 5, Mongoose 9, MongoDB Atlas / local replica set, `express-session` with `connect-mongo`.
 - **Authentication:** Passport.js Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` protection and verified-email claims, alongside bcrypt-hashed email/password credentials.
 - **Security & Reliability:** `helmet`, `express-rate-limit`, configurable proxy trust, SameSite HTTP-only session cookies, server-authoritative role checks, and origin verification on state-changing requests.
-- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership. Standalone topologies without transaction support are explicitly rejected.
+- **Concurrency & Atomicity:** MongoDB multi-document transactions and partial unique index on orders (`{ paintingId: 1 }, { unique: true, partialFilterExpression: { status: 'placed' } }`) guaranteeing single active ownership. Standalone topologies without transaction support are explicitly rejected when an operation requiring `runInTransaction` is attempted.
 - **Frontend:** React 19, Vite 7, React Router 7 (`react-router-dom`), custom accessible animated-logo loader, responsive DM Sans / Playfair Display styling.
 
 ---
@@ -127,7 +127,7 @@ STUDIO_PASSWORD=replace-with-a-strong-studio-password-min-12-chars
 
 ## Database Setup & Replica Set Requirement
 
-MongoDB transactions require a replica set or MongoDB Atlas deployment. Standalone MongoDB topologies that do not support transactions are rejected at runtime.
+MongoDB transactions require a replica set or MongoDB Atlas deployment. Standalone MongoDB topologies that do not support transactions are rejected when an operation requiring `runInTransaction` is attempted.
 
 ### 1. MongoDB Atlas Setup (Production / Cloud Dev)
 1. Create a cluster on [MongoDB Atlas](https://www.mongodb.com/cloud/atlas).

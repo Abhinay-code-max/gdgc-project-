@@ -5,7 +5,7 @@ This file is the integration contract agreed for the Art Studio application.
 ## Stack
 
 - Node.js 20+, Express 5, React 19, React Router 7, Vite 7.
-- MongoDB with Mongoose 9. Database is accessed via `MONGODB_URI` (MongoDB Atlas or replica set in dev/production). Tests use an isolated in-memory replica set (`MongoMemoryReplSet`) supporting multi-document transactions. Standalone topologies without transaction support are rejected.
+- MongoDB with Mongoose 9. Database is accessed via `MONGODB_URI` (MongoDB Atlas or replica set in dev/production). Tests use an isolated in-memory replica set (`MongoMemoryReplSet`) supporting multi-document transactions. Standalone topologies without transaction support are rejected when an operation requiring `runInTransaction` is attempted.
 - `express-session` with MongoDB-backed session store (`connect-mongo`), HTTP-only same-site (lax for OAuth redirect compatibility) cookies, `bcryptjs` password hashes, JSON body limits, and an Origin check on mutations.
 - Passport.js with Google OAuth 2.0 strategy (`passport-google-oauth20`) with CSRF `state` enforcement.
 - `express-rate-limit` for tiered endpoint protection with configurable `trustProxy`.
